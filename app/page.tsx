@@ -7,6 +7,7 @@ import FileActivity from "@/components/FileActivity";
 import PinnedNotes from "@/components/PinnedNotes";
 import AgentSidebar from "@/components/AgentSidebar";
 import NewAgentDialog from "@/components/NewAgentDialog";
+import MetaAgentChat from "@/components/MetaAgentChat";
 import { useWs } from "@/lib/use-ws";
 import { api, WS_URL } from "@/lib/api";
 import type {
@@ -19,6 +20,7 @@ import type {
 
 const FILE_TTL_MS = 60_000;
 const SELECTED_KEY = "agents.selectedId.v1";
+const META_OPEN_KEY = "meta-agent.open.v1";
 
 type AgentEntry = { agent: Agent; runtime: AgentRuntime };
 
@@ -28,7 +30,35 @@ export default function Home() {
   const [eventsByAgent, setEventsByAgent] = useState<Record<string, TranscriptEvent[]>>({});
   const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
   const [showNew, setShowNew] = useState(false);
+  const [metaOpen, setMetaOpen] = useState(false);
   const [, setTick] = useState(0);
+
+  // Load + persist meta-agent open state.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(META_OPEN_KEY);
+      if (saved === "1") setMetaOpen(true);
+    } catch {}
+  }, []);
+  useEffect(() => {
+    try {
+      localStorage.setItem(META_OPEN_KEY, metaOpen ? "1" : "0");
+    } catch {}
+  }, [metaOpen]);
+
+  // Keyboard shortcut: Cmd/Ctrl+K toggles the meta-agent; Esc closes it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setMetaOpen((v) => !v);
+      } else if (e.key === "Escape" && metaOpen) {
+        setMetaOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [metaOpen]);
 
   // Persist selection across reloads.
   useEffect(() => {
@@ -144,14 +174,31 @@ export default function Home() {
             onNew={() => setShowNew(true)}
           />
         </div>
-        <div className="col-span-6 overflow-hidden border-r border-zinc-800">
+        <div
+          className={
+            metaOpen
+              ? "col-span-4 overflow-hidden border-r border-zinc-800"
+              : "col-span-6 overflow-hidden border-r border-zinc-800"
+          }
+        >
           <Transcript
             events={selectedEvents}
             agentName={selected?.agent.name ?? null}
             sessionPath={selected?.runtime.sessionPath ?? null}
           />
         </div>
-        <div className="col-span-4 grid grid-rows-[1fr_minmax(180px,40%)] overflow-hidden">
+        {metaOpen && (
+          <div className="col-span-3 overflow-hidden border-r border-zinc-800">
+            <MetaAgentChat onClose={() => setMetaOpen(false)} />
+          </div>
+        )}
+        <div
+          className={
+            metaOpen
+              ? "col-span-3 grid grid-rows-[1fr_minmax(180px,40%)] overflow-hidden"
+              : "col-span-4 grid grid-rows-[1fr_minmax(180px,40%)] overflow-hidden"
+          }
+        >
           <div className="overflow-hidden border-b border-zinc-800">
             <PinnedNotes />
           </div>
@@ -163,6 +210,19 @@ export default function Home() {
           </div>
         </div>
       </div>
+      {!metaOpen && (
+        <button
+          onClick={() => setMetaOpen(true)}
+          className="fixed bottom-4 right-4 z-40 flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 shadow-lg hover:bg-zinc-800"
+          title="Open meta-agent (⌘K)"
+        >
+          <span className="size-2 rounded-full bg-emerald-500" />
+          ask meta-agent
+          <span className="ml-1 rounded border border-zinc-700 px-1 text-[10px] text-zinc-500">
+            ⌘K
+          </span>
+        </button>
+      )}
       {showNew && (
         <NewAgentDialog
           onClose={() => setShowNew(false)}
