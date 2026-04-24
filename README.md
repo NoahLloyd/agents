@@ -1,36 +1,37 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# agents
 
-## Getting Started
+A local dashboard for running multiple Claude Code agents in parallel — each with its own working directory, direction (inline prompt or a markdown file it re-reads each turn), and keep-alive supervisor that auto-restarts on crash and auto-resumes when usage limits reset.
 
-First, run the development server:
+Built to replace a launchd-based heartbeat with something visible and controllable from a UI.
+
+## Stack
+
+- **Next.js 16** (App Router, Turbopack) on port `4000` — UI, file I/O API routes
+- **Bun** WebSocket + HTTP server on port `4001` — agent supervisor, transcript streaming, file-change events
+- **Claude Code CLI** spawned per agent (`--dangerously-skip-permissions`, configurable model / fallback / effort)
+- **Tailwind v4**
+
+## Features
+
+- Multiple agents running concurrently, each with its own `workingDir`
+- Two direction modes: inline prompt, or "re-read this markdown file each turn"
+- Live transcript per agent (JSONL session file watching), with pause-on-scroll-up autoscroll
+- Keep-alive supervisor: restarts on crash, parses `usage limit reached|<ts>` from stderr and auto-resumes after the reset
+- Per-agent file activity + diff panel
+- Pinned notes as tabs (fuzzy vault search when adding)
+- Registry persisted to `data/agents.json`; PID files let the supervisor reattach to surviving children across reloads
+
+## Run
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+bun install
+bun dev            # starts Next (4000) + ws-server (4001) under concurrently
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open <http://localhost:4000>.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+The supervisor detaches children and `unref`s them, so `bun --watch` reloads don't kill running agents — it re-attaches via PID files on next init.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Cost
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Agents run against the Claude Code CLI's OAuth credentials (Max plan). The supervisor explicitly strips `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_CODE_OAUTH_TOKEN` from the child env to make sure no leaked API key can route a spawned agent to pay-per-token billing.

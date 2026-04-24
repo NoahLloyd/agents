@@ -3,20 +3,25 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "concurrently -k -n web,ws -c blue,magenta \"next dev -p 4000\" \"bun --watch ws-server.ts\"",
+    "dev:web": "next dev -p 4000",
+    "dev:ws": "bun --watch ws-server.ts",
     "build": "next build",
-    "start": "next start"
+    "start": "next start -p 4000"
   },
   "dependencies": {
+    "chokidar": "^5.0.0",
     "next": "16.2.4",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/bun": "^1.3.13",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^9.2.1",
     "tailwindcss": "^4",
     "typescript": "^5"
   },

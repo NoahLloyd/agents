@@ -1,65 +1,177 @@
-import Image from "next/image";
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import StatusHeader from "@/components/StatusHeader";
+import Transcript from "@/components/Transcript";
+import FileActivity from "@/components/FileActivity";
+import PinnedNotes from "@/components/PinnedNotes";
+import AgentSidebar from "@/components/AgentSidebar";
+import NewAgentDialog from "@/components/NewAgentDialog";
+import { useWs } from "@/lib/use-ws";
+import { api, WS_URL } from "@/lib/api";
+import type {
+  Agent,
+  AgentRuntime,
+  TranscriptEvent,
+  FileChange,
+  WsMessage,
+} from "@/lib/types";
+
+const FILE_TTL_MS = 60_000;
+const SELECTED_KEY = "agents.selectedId.v1";
+
+type AgentEntry = { agent: Agent; runtime: AgentRuntime };
 
 export default function Home() {
+  const [agents, setAgents] = useState<AgentEntry[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [eventsByAgent, setEventsByAgent] = useState<Record<string, TranscriptEvent[]>>({});
+  const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
+  const [showNew, setShowNew] = useState(false);
+  const [, setTick] = useState(0);
+
+  // Persist selection across reloads.
+  useEffect(() => {
+    const saved = localStorage.getItem(SELECTED_KEY);
+    if (saved) setSelectedId(saved);
+  }, []);
+  useEffect(() => {
+    if (selectedId) localStorage.setItem(SELECTED_KEY, selectedId);
+  }, [selectedId]);
+
+  // Re-render every second so countdowns/uptime tick.
+  useEffect(() => {
+    const i = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(i);
+  }, []);
+
+  // Drop expired live file changes.
+  useEffect(() => {
+    const i = setInterval(() => {
+      setFileChanges((prev) => prev.filter((c) => Date.now() - c.ts < FILE_TTL_MS));
+    }, 5000);
+    return () => clearInterval(i);
+  }, []);
+
+  // Initial fetch (handles the case where WS is slow).
+  useEffect(() => {
+    void api
+      .list()
+      .then((j) => setAgents(j.agents))
+      .catch(() => {});
+  }, []);
+
+  const { connected } = useWs(WS_URL, (m: WsMessage) => {
+    if (m.type === "agents_snapshot") {
+      setAgents(m.agents);
+      setSelectedId((cur) => {
+        if (cur && m.agents.some((a) => a.agent.id === cur)) return cur;
+        return m.agents[0]?.agent.id ?? null;
+      });
+    } else if (m.type === "agent") {
+      setAgents((prev) => {
+        const idx = prev.findIndex((a) => a.agent.id === m.agent.id);
+        if (idx === -1) return [...prev, { agent: m.agent, runtime: m.runtime }];
+        const next = prev.slice();
+        next[idx] = { agent: m.agent, runtime: m.runtime };
+        return next;
+      });
+    } else if (m.type === "agent_removed") {
+      setAgents((prev) => prev.filter((a) => a.agent.id !== m.agentId));
+      setEventsByAgent((prev) => {
+        const next = { ...prev };
+        delete next[m.agentId];
+        return next;
+      });
+      setSelectedId((cur) => (cur === m.agentId ? null : cur));
+    } else if (m.type === "transcript") {
+      setEventsByAgent((prev) => {
+        const cur = prev[m.agentId] ?? [];
+        return { ...prev, [m.agentId]: [...cur, m.event] };
+      });
+    } else if (m.type === "file") {
+      setFileChanges((prev) => [...prev, m.change]);
+    }
+  });
+
+  // Auto-select first agent if none.
+  useEffect(() => {
+    if (!selectedId && agents.length > 0) setSelectedId(agents[0].agent.id);
+  }, [agents, selectedId]);
+
+  // Lazy-load transcript history for newly selected agent if we have none.
+  useEffect(() => {
+    if (!selectedId) return;
+    if ((eventsByAgent[selectedId]?.length ?? 0) > 0) return;
+    void api
+      .events(selectedId)
+      .then((r) =>
+        setEventsByAgent((prev) => ({
+          ...prev,
+          [selectedId]: r.events,
+        })),
+      )
+      .catch(() => {});
+  }, [selectedId]);
+
+  const selected = useMemo(
+    () => agents.find((a) => a.agent.id === selectedId) ?? null,
+    [agents, selectedId],
+  );
+
+  const selectedEvents = selectedId ? (eventsByAgent[selectedId] ?? []) : [];
+
+  const liveChangesForAgent = selected
+    ? fileChanges.filter((c) =>
+        c.path.startsWith(selected.agent.workingDir + "/"),
+      )
+    : [];
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
+      <StatusHeader
+        agent={selected?.agent ?? null}
+        runtime={selected?.runtime ?? null}
+        connected={connected}
+        agentCount={agents.length}
+      />
+      <div className="grid flex-1 grid-cols-12 overflow-hidden">
+        <div className="col-span-2 overflow-hidden">
+          <AgentSidebar
+            agents={agents}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            onNew={() => setShowNew(true)}
+          />
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+        <div className="col-span-6 overflow-hidden border-r border-zinc-800">
+          <Transcript
+            events={selectedEvents}
+            agentName={selected?.agent.name ?? null}
+            sessionPath={selected?.runtime.sessionPath ?? null}
+          />
+        </div>
+        <div className="col-span-4 grid grid-rows-[1fr_minmax(180px,40%)] overflow-hidden">
+          <div className="overflow-hidden border-b border-zinc-800">
+            <PinnedNotes />
+          </div>
+          <div className="overflow-hidden">
+            <FileActivity
+              liveChanges={liveChangesForAgent}
+              workingDir={selected?.agent.workingDir ?? null}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+          </div>
         </div>
-      </main>
+      </div>
+      {showNew && (
+        <NewAgentDialog
+          onClose={() => setShowNew(false)}
+          onCreated={(a) => {
+            setShowNew(false);
+            setSelectedId(a.id);
+          }}
+        />
+      )}
     </div>
   );
 }
