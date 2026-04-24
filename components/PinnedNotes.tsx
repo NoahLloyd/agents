@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 
 const STORAGE_KEY = "agents.pinnedNotes.v1";
@@ -88,6 +89,7 @@ export default function PinnedNotes() {
   };
 
   const active = pins[activeIdx];
+  const addBtnRef = useRef<HTMLButtonElement>(null);
 
   return (
     <div className="flex h-full flex-col">
@@ -118,6 +120,7 @@ export default function PinnedNotes() {
           </button>
         ))}
         <button
+          ref={addBtnRef}
           onClick={() => setSearchOpen((o) => !o)}
           className="ml-auto shrink-0 px-2 py-1 text-xs text-zinc-500 hover:text-zinc-200"
           title="pin another note"
@@ -126,6 +129,7 @@ export default function PinnedNotes() {
         </button>
         {searchOpen && (
           <PinSearch
+            anchorRef={addBtnRef}
             onPick={(absPath) => {
               addByPath(absPath);
               setSearchOpen(false);
@@ -146,9 +150,11 @@ export default function PinnedNotes() {
 }
 
 function PinSearch({
+  anchorRef,
   onPick,
   onClose,
 }: {
+  anchorRef: React.RefObject<HTMLButtonElement | null>;
   onPick: (absPath: string) => void;
   onClose: () => void;
 }) {
@@ -156,8 +162,30 @@ function PinSearch({
   const [results, setResults] = useState<{ absPath: string; relPath: string; name: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Anchor the dropdown to the + pin button. Portaled into document.body so
+  // ancestors with overflow-hidden don't clip it.
+  useLayoutEffect(() => {
+    const recompute = () => {
+      const rect = anchorRef.current?.getBoundingClientRect();
+      if (rect) {
+        setPos({
+          top: rect.bottom + 4,
+          right: Math.max(8, window.innerWidth - rect.right),
+        });
+      }
+    };
+    recompute();
+    window.addEventListener("resize", recompute);
+    window.addEventListener("scroll", recompute, true);
+    return () => {
+      window.removeEventListener("resize", recompute);
+      window.removeEventListener("scroll", recompute, true);
+    };
+  }, [anchorRef]);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -165,13 +193,18 @@ function PinSearch({
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(target) &&
+        !anchorRef.current?.contains(target)
+      ) {
         onClose();
       }
     };
     document.addEventListener("mousedown", onClick);
     return () => document.removeEventListener("mousedown", onClick);
-  }, [onClose]);
+  }, [onClose, anchorRef]);
 
   useEffect(() => {
     let cancelled = false;
@@ -213,10 +246,13 @@ function PinSearch({
     }
   };
 
-  return (
+  if (pos === null) return null;
+
+  return createPortal(
     <div
       ref={containerRef}
-      className="absolute right-0 top-full z-40 mt-1 w-96 max-w-[90vw] overflow-hidden rounded border border-zinc-700 bg-zinc-900 shadow-xl"
+      style={{ position: "fixed", top: pos.top, right: pos.right }}
+      className="z-50 w-96 max-w-[90vw] overflow-hidden rounded border border-zinc-700 bg-zinc-900 shadow-xl"
     >
       <input
         ref={inputRef}
@@ -253,7 +289,8 @@ function PinSearch({
           </button>
         ))}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
