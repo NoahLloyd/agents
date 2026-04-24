@@ -49,6 +49,17 @@ export const api = {
     jfetch<{ events: import("./types").TranscriptEvent[] }>(
       `${WS_HTTP}/agents/${id}/events?max=${max}`,
     ),
+  claudeProcs: () =>
+    jfetch<{
+      procs: {
+        pid: number;
+        ppid: number;
+        cpu: number;
+        rssMb: number;
+        cmd: string;
+        agentName: string | null;
+      }[];
+    }>(`${WS_HTTP}/claude-procs`),
   readFile: (p: string) =>
     jfetch<{ content: string; path: string; mtimeMs: number }>(
       `/api/file?path=${encodeURIComponent(p)}`,

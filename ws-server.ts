@@ -53,6 +53,50 @@ const server = Bun.serve<ClientData, never>({
       return json({ agents: listLive() });
     }
 
+    // GET /claude-procs — enumerate claude CLI processes on this machine and
+    // flag which ones this dashboard manages.
+    if (url.pathname === "/claude-procs" && req.method === "GET") {
+      const proc = Bun.spawnSync({
+        cmd: ["ps", "-axo", "pid,ppid,pcpu,rss,command"],
+      });
+      const out = new TextDecoder().decode(proc.stdout);
+      const self = process.pid;
+      const rows: {
+        pid: number;
+        ppid: number;
+        cpu: number;
+        rssMb: number;
+        cmd: string;
+      }[] = [];
+      for (const line of out.split("\n").slice(1)) {
+        const m = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(.*)$/);
+        if (!m) continue;
+        const pid = Number(m[1]);
+        const ppid = Number(m[2]);
+        const cpu = Number(m[3]);
+        const rssKb = Number(m[4]);
+        const cmd = m[5];
+        if (pid === self) continue;
+        // Match "claude" CLI only: word boundary match, skip the macOS app
+        // bundle and its renderer/GPU helpers.
+        if (!/(^|\/|\s)claude(\s|$)/.test(cmd)) continue;
+        if (/\.app\//.test(cmd)) continue;
+        if (/Claude Helper/.test(cmd)) continue;
+        if (/^(?:ps|grep)\b/.test(cmd)) continue;
+        rows.push({ pid, ppid, cpu, rssMb: Math.round(rssKb / 1024), cmd });
+      }
+      const live = listLive();
+      const pidToAgent = new Map<number, string>();
+      for (const l of live) {
+        if (l.runtime.pid != null) pidToAgent.set(l.runtime.pid, l.agent.name);
+      }
+      const procs = rows.map((r) => ({
+        ...r,
+        agentName: pidToAgent.get(r.pid) ?? pidToAgent.get(r.ppid) ?? null,
+      }));
+      return json({ procs });
+    }
+
     // POST /agents — create
     if (url.pathname === "/agents" && req.method === "POST") {
       const body = (await req.json()) as Partial<Agent>;

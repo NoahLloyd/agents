@@ -1,6 +1,7 @@
 "use client";
 
 import type { Agent, AgentRuntime } from "@/lib/types";
+import ClaudeInstances from "./ClaudeInstances";
 
 function fmtUptime(sec: number | null): string {
   if (sec === null) return "—";
@@ -78,6 +79,9 @@ export default function StatusHeader({
             )}
           </>
         )}
+        <div className="ml-auto">
+          <ClaudeInstances />
+        </div>
       </div>
     </header>
   );
