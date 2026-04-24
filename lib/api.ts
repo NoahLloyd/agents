@@ -57,9 +57,21 @@ export const api = {
         cpu: number;
         rssMb: number;
         cmd: string;
+        source: string;
         agentName: string | null;
       }[];
     }>(`${WS_HTTP}/claude-procs`),
+  autoCommitNow: () =>
+    jfetch<{ results: import("./types").AutoCommitInfo[] }>(
+      `${WS_HTTP}/autocommit`,
+      { method: "POST" },
+    ),
+  getConfig: () => jfetch<{ vaultDir: string }>(`${WS_HTTP}/config`),
+  updateConfig: (body: { vaultDir?: string }) =>
+    jfetch<{ vaultDir: string }>(`${WS_HTTP}/config`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   readFile: (p: string) =>
     jfetch<{ content: string; path: string; mtimeMs: number }>(
       `/api/file?path=${encodeURIComponent(p)}`,

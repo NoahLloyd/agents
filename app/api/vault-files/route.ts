@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
-import { VAULT } from "@/lib/vault";
+import { getVaultDir } from "@/lib/vault";
 
 export const dynamic = "force-dynamic";
 
@@ -40,7 +40,7 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const q = (url.searchParams.get("q") ?? "").toLowerCase().trim();
   const rootParam = url.searchParams.get("root");
-  let root = VAULT;
+  let root = getVaultDir();
   if (rootParam) {
     const abs = path.resolve(rootParam);
     if (abs.startsWith(HOME + "/") || abs === HOME) root = abs;

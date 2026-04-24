@@ -1,16 +1,17 @@
 import { NextResponse } from "next/server";
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { VAULT } from "@/lib/vault";
+import { getVaultDir } from "@/lib/vault";
 
 export const dynamic = "force-dynamic";
 
 const HOME = process.env.HOME ?? "/Users/noah";
 
 function safeWorkingDir(p: string | null): string {
-  if (!p) return VAULT;
+  const vault = getVaultDir();
+  if (!p) return vault;
   const abs = path.resolve(p);
-  if (!abs.startsWith(HOME + "/") && abs !== HOME) return VAULT;
+  if (!abs.startsWith(HOME + "/") && abs !== HOME) return vault;
   return abs;
 }
 

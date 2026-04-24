@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { FileChange } from "@/lib/types";
+import type { AutoCommitInfo, FileChange } from "@/lib/types";
 
 type Commit = {
   hash: string;
@@ -27,12 +27,19 @@ const STATUS_COLOR: Record<string, string> = {
 export default function FileActivity({
   liveChanges,
   workingDir,
+  lastCommit,
+  onOpenFile,
 }: {
   liveChanges: FileChange[];
   workingDir: string | null;
+  lastCommit: AutoCommitInfo | null;
+  onOpenFile: (args: {
+    workingDir: string;
+    hash: string;
+    filePath: string | null;
+  }) => void;
 }) {
   const [data, setData] = useState<FilesResp | null>(null);
-  const [diff, setDiff] = useState<{ title: string; body: string } | null>(null);
 
   const refresh = async () => {
     if (!workingDir) {
@@ -54,30 +61,28 @@ export default function FileActivity({
     if (liveChanges.length > 0) void refresh();
   }, [liveChanges.length]);
 
-  const showDiff = async (hash: string, file?: string) => {
+  const showDiff = (hash: string, file?: string) => {
     if (!workingDir) return;
-    const url = `/api/diff?workingDir=${encodeURIComponent(workingDir)}&hash=${encodeURIComponent(hash)}${
-      file ? `&file=${encodeURIComponent(file)}` : ""
-    }`;
-    const r = await fetch(url);
-    const j = (await r.json()) as { diff: string };
-    setDiff({
-      title: file ? `${hash.slice(0, 7)} · ${file}` : hash.slice(0, 7),
-      body: j.diff,
-    });
+    onOpenFile({ workingDir, hash, filePath: file ?? null });
   };
 
   return (
     <div className="relative flex h-full flex-col">
-      <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-1.5">
-        <span className="text-[10px] uppercase tracking-wider text-zinc-500">
+      <div className="flex items-center justify-between gap-2 border-b border-zinc-800 px-3 py-1.5">
+        <span className="shrink-0 text-[10px] uppercase tracking-wider text-zinc-500">
           file activity
         </span>
-        {workingDir && (
-          <span className="truncate text-[10px] text-zinc-600 font-mono" title={workingDir}>
-            {workingDir.split("/").pop()}
-          </span>
-        )}
+        <div className="flex min-w-0 items-center gap-2">
+          {lastCommit && <CommitChip info={lastCommit} />}
+          {workingDir && (
+            <span
+              className="truncate font-mono text-[10px] text-zinc-600"
+              title={workingDir}
+            >
+              {workingDir.split("/").pop()}
+            </span>
+          )}
+        </div>
       </div>
       <div className="flex-1 overflow-auto px-3 py-2 text-xs">
         {!workingDir && (
@@ -96,6 +101,11 @@ export default function FileActivity({
                   key={`live-${i}`}
                   status={c.kind === "add" ? "A" : c.kind === "unlink" ? "D" : "M"}
                   path={c.relPath}
+                  onClick={
+                    c.kind === "unlink"
+                      ? undefined
+                      : () => showDiff("WORKING", c.relPath)
+                  }
                 />
               ))}
           </Section>
@@ -141,45 +151,6 @@ export default function FileActivity({
           </Section>
         ))}
       </div>
-      {diff && (
-        <div
-          className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-          onClick={() => setDiff(null)}
-        >
-          <div
-            className="flex max-h-full max-w-5xl flex-col overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2">
-              <span className="font-mono text-sm text-zinc-300">{diff.title}</span>
-              <button
-                onClick={() => setDiff(null)}
-                className="text-zinc-500 hover:text-zinc-200"
-              >
-                ✕
-              </button>
-            </div>
-            <pre className="flex-1 overflow-auto px-4 py-3 font-mono text-xs">
-              {diff.body.split("\n").map((line, i) => (
-                <div
-                  key={i}
-                  className={
-                    line.startsWith("+") && !line.startsWith("+++")
-                      ? "text-emerald-300"
-                      : line.startsWith("-") && !line.startsWith("---")
-                        ? "text-red-300"
-                        : line.startsWith("@@")
-                          ? "text-blue-300"
-                          : "text-zinc-400"
-                  }
-                >
-                  {line || " "}
-                </div>
-              ))}
-            </pre>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -220,4 +191,57 @@ function Row({
       <span className="truncate text-zinc-300">{path}</span>
     </div>
   );
+}
+
+function fmtAgo(ms: number): string {
+  const diff = Math.max(0, Date.now() - ms);
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function CommitChip({ info }: { info: AutoCommitInfo }) {
+  const ago = fmtAgo(info.ts);
+  if (info.state === "committed") {
+    const label = info.pushed ? "pushed" : "committed";
+    const color = info.pushed ? "bg-emerald-500" : "bg-emerald-500/60";
+    return (
+      <span
+        className="flex items-center gap-1 font-mono text-[10px] text-zinc-500"
+        title={`auto-${label} ${ago}${info.hash ? ` (${info.hash})` : ""}${
+          info.pushed ? "" : " — push failed or no upstream"
+        }`}
+      >
+        <span className={`inline-block h-1.5 w-1.5 rounded-full ${color}`} />
+        {info.hash ?? "commit"} · {ago}
+      </span>
+    );
+  }
+  if (info.state === "no-changes") {
+    return (
+      <span
+        className="flex items-center gap-1 font-mono text-[10px] text-zinc-600"
+        title={`auto-commit ran ${ago} — no changes`}
+      >
+        <span className="inline-block h-1.5 w-1.5 rounded-full bg-zinc-600" />
+        clean · {ago}
+      </span>
+    );
+  }
+  if (info.state === "error") {
+    return (
+      <span
+        className="flex items-center gap-1 font-mono text-[10px] text-red-400"
+        title={info.message ?? "auto-commit error"}
+      >
+        <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-500" />
+        commit error
+      </span>
+    );
+  }
+  return null;
 }

@@ -93,14 +93,14 @@ export default function PinnedNotes() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="relative flex items-center gap-1 overflow-x-auto border-b border-zinc-800 bg-zinc-950 px-2">
+      <div className="relative flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-zinc-800 bg-zinc-950 px-2">
         {pins.map((p, i) => (
           <button
             key={p.path}
             onClick={() => setActiveIdx(i)}
             onDoubleClick={() => renamePin(i)}
             title={`${p.path} — double-click to rename`}
-            className={`group relative shrink-0 px-3 py-1.5 text-xs ${
+            className={`group relative inline-flex h-full shrink-0 items-center px-3 text-xs ${
               i === activeIdx
                 ? "border-b-2 border-emerald-500 text-zinc-100"
                 : "text-zinc-500 hover:text-zinc-300"
@@ -122,7 +122,7 @@ export default function PinnedNotes() {
         <button
           ref={addBtnRef}
           onClick={() => setSearchOpen((o) => !o)}
-          className="ml-auto shrink-0 px-2 py-1 text-xs text-zinc-500 hover:text-zinc-200"
+          className="ml-auto inline-flex h-full shrink-0 items-center px-2 text-xs text-zinc-500 hover:text-zinc-200"
           title="pin another note"
         >
           + pin
@@ -186,10 +186,6 @@ function PinSearch({
       window.removeEventListener("scroll", recompute, true);
     };
   }, [anchorRef]);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
@@ -256,6 +252,7 @@ function PinSearch({
     >
       <input
         ref={inputRef}
+        autoFocus
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         onKeyDown={onKey}

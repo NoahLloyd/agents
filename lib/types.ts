@@ -56,9 +56,27 @@ export type FileChange = {
   ts: number;
 };
 
+export type AutoCommitState =
+  | "committed"
+  | "no-changes"
+  | "not-a-repo"
+  | "error";
+
+export type AutoCommitInfo = {
+  workingDir: string;
+  state: AutoCommitState;
+  hash?: string;
+  message?: string;
+  pushed?: boolean;
+  agentNames: string[];
+  ts: number;
+};
+
 export type WsMessage =
   | { type: "transcript"; agentId: string; event: TranscriptEvent }
   | { type: "file"; agentId: string | null; change: FileChange }
   | { type: "agent"; agent: Agent; runtime: AgentRuntime }
   | { type: "agent_removed"; agentId: string }
-  | { type: "agents_snapshot"; agents: { agent: Agent; runtime: AgentRuntime }[] };
+  | { type: "agents_snapshot"; agents: { agent: Agent; runtime: AgentRuntime }[] }
+  | { type: "auto_commit"; info: AutoCommitInfo }
+  | { type: "session_reset"; agentId: string };

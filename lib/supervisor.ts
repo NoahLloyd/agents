@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -36,7 +36,22 @@ type LiveAgent = {
   restartTimer: ReturnType<typeof setTimeout> | null;
   // Track when we spawned to attribute the next-created session file.
   spawnedAt: number | null;
+  // Timestamp of the most recent transcript event, used for stuck-detection.
+  lastActivityAt: number | null;
+  // Previous session JSONL paths this agent has used. After a restart the
+  // pre-restart file is often still the "newest" one on disk for a few
+  // seconds — skipping it prevents us from re-tailing it and replaying
+  // every old event as if it were fresh.
+  usedSessionPaths: Set<string>;
 };
+
+// An agent that's alive but has produced no transcript activity for this
+// long is considered stuck and gets killed + relaunched.
+const STUCK_THRESHOLD_MS = 5 * 60 * 1000;
+// Short backoff after a voluntary/clean exit or crash before respawning.
+// Previously 30s — long enough that clean exits felt like they never came
+// back.
+const RESTART_BACKOFF_MS = 5_000;
 
 const live: Map<string, LiveAgent> = new Map();
 let broadcastFn: Broadcast = () => {};
@@ -65,11 +80,45 @@ function writePidFile(agentId: string, pid: number | null): void {
 }
 
 function isAlive(pid: number): boolean {
+  // kill(pid,0) returns true for ANY process that exists in the process
+  // table — including zombies. A claude that exited but hasn't been reaped
+  // would look alive to the supervisor and never get restarted. Check the
+  // kernel state and reject anything whose state starts with Z (zombie).
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     return false;
+  }
+  try {
+    const r = spawnSync("ps", ["-p", String(pid), "-o", "state="], {
+      encoding: "utf8",
+    });
+    const state = (r.stdout ?? "").trim();
+    if (!state) return false;
+    if (state.startsWith("Z")) return false;
+    return true;
+  } catch {
+    // If ps fails for some reason, trust the kill(pid,0) result.
+    return true;
+  }
+}
+
+/**
+ * Read the wall-clock time the given PID actually started, via `ps -o
+ * lstart=`. Used on ws-server reattach so uptime reflects the real process
+ * lifetime instead of resetting every time the dashboard hot-reloads.
+ */
+function processStartTimeMs(pid: number): number | null {
+  try {
+    const r = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
+      encoding: "utf8",
+    });
+    const out = (r.stdout ?? "").trim();
+    if (!out) return null;
+    const ms = new Date(out).getTime();
+    return Number.isFinite(ms) ? ms : null;
+  } catch {
+    return null;
   }
 }
 
@@ -114,15 +163,19 @@ export function setBroadcaster(fn: Broadcast): void {
   broadcastFn = fn;
 }
 
+const NEVER_EXIT_CODA = `Begin. This session must never end voluntarily. Do not ask questions, do not declare yourself done, do not exit. If you believe the immediate task is complete, find related work: deepen, refactor, cross-link, stress-test, or explore adjacent questions. Always have a next tool call queued.`;
+
 function buildPrompt(agent: Agent): string {
-  if (agent.direction.kind === "inline") return agent.direction.prompt;
+  if (agent.direction.kind === "inline") {
+    return `${agent.direction.prompt}\n\n${NEVER_EXIT_CODA}`;
+  }
   // file-mode: re-read on every spawn so edits to the file take effect next turn.
   const fp = agent.direction.filePath;
   if (!existsSync(fp)) {
-    return `Your steering file ${fp} does not exist yet. Create it and begin work, or wait for instructions.`;
+    return `Your steering file ${fp} does not exist yet. Create it and begin work.\n\n${NEVER_EXIT_CODA}`;
   }
   const body = readFileSync(fp, "utf8");
-  return `Your steering file is ${fp}. Re-read it often. Current contents follow:\n\n---\n${body}\n---\n\nBegin. Don't ask questions, don't stop, don't exit. Always have a next tool call queued.`;
+  return `Your steering file is ${fp}. Re-read it often. Current contents follow:\n\n---\n${body}\n---\n\n${NEVER_EXIT_CODA}`;
 }
 
 function spawnAgent(la: LiveAgent): void {
@@ -173,11 +226,25 @@ function spawnAgent(la: LiveAgent): void {
   }
   child.unref();
 
+  // Reap immediately when this process exits. Without this listener the
+  // child becomes a zombie under the supervisor (we never waitpid()) and
+  // kill(pid,0)-based polling reports it as alive forever. Listening also
+  // catches the exit a couple of seconds before the PID poll would.
+  const childPid = child.pid;
+  child.on("exit", (code, signal) => {
+    if (la.runtime.pid !== childPid) return; // a later spawn already replaced us
+    handleAgentExit(la, code, signal);
+  });
+
+  // Remember the outgoing session so attributeNewestSession doesn't re-pick
+  // it during the tail window where it's still the freshest file on disk.
+  if (la.runtime.sessionPath) la.usedSessionPaths.add(la.runtime.sessionPath);
   la.runtime.pid = child.pid;
   la.runtime.startedAt = Date.now();
   la.runtime.alive = true;
   la.runtime.sessionPath = null;
   la.runtime.lastExit = null;
+  la.lastActivityAt = Date.now();
   la.runtime.scheduledRestartAt = null;
   la.spawnedAt = Date.now();
   la.sessionOffset = 0;
@@ -223,31 +290,71 @@ function detectRateLimitFromStderr(stderrPath: string): number | null {
   }
 }
 
+function handleAgentExit(
+  la: LiveAgent,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): void {
+  if (!la.runtime.alive && la.runtime.pid === null) return; // already handled
+  const exitedPid = la.runtime.pid;
+  la.runtime.alive = false;
+  la.runtime.pid = null;
+  la.runtime.uptimeSec = null;
+  la.runtime.lastExit = { code, signal, ts: Date.now() };
+  writePidFile(la.agent.id, null);
+  console.log(
+    `[sup] agent ${la.agent.name} pid=${exitedPid} exited (code=${code ?? "?"} signal=${signal ?? "?"})`,
+  );
+  if (la.agent.enabled && la.agent.keepAlive) {
+    const limitUntil = detectRateLimitFromStderr(la.runtime.stderrLogPath);
+    if (limitUntil && limitUntil > Date.now()) {
+      la.runtime.rateLimitedUntil = limitUntil;
+      scheduleRestart(la, limitUntil + 5_000);
+    } else {
+      // Crash, voluntary exit, "I'm done" — all get the same fast restart.
+      // Small backoff prevents tight crash loops.
+      scheduleRestart(la, Date.now() + RESTART_BACKOFF_MS);
+    }
+  }
+  broadcastAgent(la);
+}
+
 function pollExitedAgents(): void {
   for (const la of live.values()) {
     if (la.runtime.pid !== null && la.runtime.alive) {
       if (!isAlive(la.runtime.pid)) {
-        const exitedPid = la.runtime.pid;
-        la.runtime.alive = false;
-        la.runtime.pid = null;
-        la.runtime.uptimeSec = null;
-        la.runtime.lastExit = { code: null, signal: null, ts: Date.now() };
-        writePidFile(la.agent.id, null);
-        console.log(`[sup] agent ${la.agent.name} pid=${exitedPid} exited`);
-
-        if (la.agent.enabled && la.agent.keepAlive) {
-          const limitUntil = detectRateLimitFromStderr(la.runtime.stderrLogPath);
-          if (limitUntil && limitUntil > Date.now()) {
-            la.runtime.rateLimitedUntil = limitUntil;
-            scheduleRestart(la, limitUntil + 5_000);
-          } else {
-            // Crash or normal exit while enabled: short backoff then relaunch.
-            scheduleRestart(la, Date.now() + 30_000);
-          }
-        }
-        broadcastAgent(la);
+        handleAgentExit(la, null, null);
       }
     }
+  }
+}
+
+/**
+ * Kill any agent that is alive but has produced no transcript activity for
+ * longer than STUCK_THRESHOLD_MS. pollExitedAgents will see the dead PID on
+ * the next tick and schedule the restart through the normal path.
+ */
+function pollStuckAgents(): void {
+  const now = Date.now();
+  for (const la of live.values()) {
+    if (!la.runtime.alive || la.runtime.pid === null) continue;
+    if (!la.agent.enabled || !la.agent.keepAlive) continue;
+    if (la.lastActivityAt === null) continue;
+    const idleMs = now - la.lastActivityAt;
+    if (idleMs < STUCK_THRESHOLD_MS) continue;
+    console.warn(
+      `[sup] agent ${la.agent.name} pid=${la.runtime.pid} idle ${Math.round(idleMs / 1000)}s — killing to force restart`,
+    );
+    try {
+      process.kill(-la.runtime.pid, "SIGTERM");
+    } catch {
+      try {
+        process.kill(la.runtime.pid, "SIGTERM");
+      } catch {}
+    }
+    // Clear so we don't spam SIGTERM every 30s — pollExitedAgents will take
+    // it from here once the OS reaps the process.
+    la.lastActivityAt = now;
   }
 }
 
@@ -268,28 +375,90 @@ function scheduleRestart(la: LiveAgent, atMs: number): void {
 }
 
 async function attributeNewestSession(la: LiveAgent): Promise<void> {
+  // Only running agents should claim session files. Stopped or
+  // never-started agents share the same sessions directory as their
+  // siblings, so without this guard the dir watcher would latch them
+  // onto whichever unclaimed JSONL looks newest — including old files
+  // from another agent's previous run, producing the "stopped agent shows
+  // someone else's work" bug.
+  if (!la.runtime.alive) return;
+  if (!la.spawnedAt) return;
   const dir = sessionsDirFor(la.agent.workingDir);
   if (!existsSync(dir)) return;
   const entries = readdirSync(dir).filter((e) => e.endsWith(".jsonl"));
-  let best: { path: string; mtime: number } | null = null;
+  const spawnedAt = la.spawnedAt;
+  // Pick the file whose creation time is closest to our spawn moment,
+  // within a tight window. Using mtime here is wrong: a sibling's still-
+  // active session file has a fresh mtime even though it's ancient.
+  let best: { path: string; diff: number } | null = null;
   for (const f of entries) {
     const full = path.join(dir, f);
     try {
       const s = statSync(full);
-      // Already attributed to a different agent? skip
       if (sessionAlreadyAttributed(full, la.agent.id)) continue;
-      // Created after our spawn timestamp (with small tolerance)?
-      if (la.spawnedAt && s.mtimeMs < la.spawnedAt - 5_000) continue;
-      if (!best || s.mtimeMs > best.mtime) {
-        best = { path: full, mtime: s.mtimeMs };
+      if (la.usedSessionPaths.has(full)) continue;
+      const born = s.birthtimeMs || s.ctimeMs;
+      const diff = born - spawnedAt;
+      if (diff < -5_000 || diff > 30_000) continue;
+      if (!best || Math.abs(diff) < Math.abs(best.diff)) {
+        best = { path: full, diff };
       }
     } catch {}
   }
   if (best && best.path !== la.runtime.sessionPath) {
+    const isSwitch = la.runtime.sessionPath !== null;
     la.runtime.sessionPath = best.path;
     la.sessionOffset = 0;
+    la.lastActivityAt = Date.now();
+    // Tell the frontend to drop any cached events from the previous session
+    // before we start streaming the new one.
+    if (isSwitch) {
+      broadcastFn({ type: "session_reset", agentId: la.agent.id });
+    }
     broadcastAgent(la);
     await tailFromOffset(la);
+  }
+}
+
+/**
+ * Attach to the agent's current session file without emitting anything
+ * that's already in it. Used on ws-server init/hot-reload so existing
+ * transcript content isn't re-streamed to clients that already have it.
+ */
+async function reattachCurrentSession(la: LiveAgent): Promise<void> {
+  if (!la.runtime.pid) return;
+  const processStart = processStartTimeMs(la.runtime.pid);
+  if (!processStart) return;
+  const dir = sessionsDirFor(la.agent.workingDir);
+  if (!existsSync(dir)) return;
+  // Claude creates its session JSONL within a few seconds of launching.
+  // Accept only files born in a tight window around the process start —
+  // this prevents picking up a sibling agent's still-active-but-older
+  // session file, which would otherwise look newest because the sibling
+  // keeps writing to it.
+  const entries = readdirSync(dir).filter((e) => e.endsWith(".jsonl"));
+  let best: { path: string; diff: number } | null = null;
+  for (const f of entries) {
+    const full = path.join(dir, f);
+    try {
+      const s = statSync(full);
+      const born = s.birthtimeMs || s.ctimeMs;
+      const diff = born - processStart;
+      if (diff < -5_000 || diff > 30_000) continue;
+      if (sessionAlreadyAttributed(full, la.agent.id)) continue;
+      if (!best || Math.abs(diff) < Math.abs(best.diff)) {
+        best = { path: full, diff };
+      }
+    } catch {}
+  }
+  if (best) {
+    la.runtime.sessionPath = best.path;
+    try {
+      la.sessionOffset = statSync(best.path).size;
+    } catch {
+      la.sessionOffset = 0;
+    }
+    broadcastAgent(la);
   }
 }
 
@@ -324,6 +493,7 @@ async function tailFromOffset(la: LiveAgent): Promise<void> {
   la.sessionOffset = s.size;
   for (const line of text.split("\n")) {
     for (const ev of parseLine(line)) {
+      la.lastActivityAt = Date.now();
       broadcastFn({ type: "transcript", agentId: la.agent.id, event: ev });
     }
   }
@@ -413,6 +583,8 @@ export function createAgent(agent: Agent): LiveAgent {
     sessionsDirWatcher: null,
     restartTimer: null,
     spawnedAt: null,
+    lastActivityAt: null,
+    usedSessionPaths: new Set(),
   };
   live.set(agent.id, la);
   persistAgent(agent);
@@ -478,18 +650,28 @@ export function init(): void {
       sessionsDirWatcher: null,
       restartTimer: null,
       spawnedAt: null,
+      lastActivityAt: null,
+      usedSessionPaths: new Set(),
     };
     // Reattach to existing live process if PID file exists.
     const existingPid = readPidFile(a.id);
     if (existingPid && isAlive(existingPid)) {
+      const actualStart = processStartTimeMs(existingPid);
       la.runtime.pid = existingPid;
       la.runtime.alive = true;
-      la.runtime.startedAt = Date.now(); // unknown actual start; approximate
-      la.spawnedAt = Date.now() - 60_000;
+      // Prefer the kernel-reported start time so uptime survives ws-server
+      // hot-reloads and reconnects. Fall back to "now" only if ps fails.
+      la.runtime.startedAt = actualStart ?? Date.now();
+      la.spawnedAt = actualStart ?? Date.now() - 60_000;
+      la.lastActivityAt = Date.now();
       console.log(
         `[sup] reattached to ${a.name} pid=${existingPid} (existing process)`,
       );
-      void attributeNewestSession(la);
+      // Reattach to the current session without re-streaming historical
+      // events. The frontend already has them cached or will fetch them
+      // on demand via getInitialEvents. Re-emitting would duplicate
+      // everything on every ws-server hot reload.
+      void reattachCurrentSession(la);
     }
     live.set(a.id, la);
     watchSessionsDirFor(la);
@@ -498,5 +680,6 @@ export function init(): void {
     }
   }
   setInterval(pollExitedAgents, 2000);
+  setInterval(pollStuckAgents, 30_000);
   startSessionTailers();
 }
