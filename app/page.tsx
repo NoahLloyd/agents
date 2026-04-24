@@ -183,7 +183,9 @@ export default function Home() {
         >
           <Transcript
             events={selectedEvents}
-            agentName={selected?.agent.name ?? null}
+            agent={selected?.agent ?? null}
+            running={selected?.runtime.alive ?? false}
+            uptimeSec={selected?.runtime.uptimeSec ?? null}
             sessionPath={selected?.runtime.sessionPath ?? null}
           />
         </div>

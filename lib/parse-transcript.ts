@@ -36,7 +36,10 @@ export function parseLine(line: string): TranscriptEvent[] {
     for (const c of content as RawEvent[]) {
       if (c.type === "text" && typeof c.text === "string") {
         out.push({ kind: "text", text: c.text, ts });
-      } else if (c.type === "thinking" && typeof c.thinking === "string") {
+      } else if (c.type === "thinking" && typeof c.thinking === "string" && c.thinking.length > 0) {
+        // Claude Code persists extended-thinking plaintext as an encrypted
+        // signature blob and writes an empty `thinking` field to the session
+        // JSONL. Skip those rather than render empty rows.
         out.push({ kind: "thinking", text: c.thinking, ts });
       } else if (c.type === "tool_use") {
         out.push({
