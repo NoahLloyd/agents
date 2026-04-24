@@ -1,7 +1,8 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import chokidar from "chokidar";
-import { VAULT } from "./lib/vault";
+import { getVaultDir } from "./lib/vault";
+import { getConfig, updateConfig } from "./lib/config";
 import {
   init as initSupervisor,
   setBroadcaster,
@@ -14,12 +15,36 @@ import {
   stopAgent,
   restartAgent,
 } from "./lib/supervisor";
+import {
+  startAutoCommit,
+  tickOnce,
+  type DirsByAgent,
+} from "./lib/git-autocommit";
 import type { Agent, FileChange, WsMessage } from "./lib/types";
 
 const PORT = Number(process.env.WS_PORT ?? 4001);
 
 type ClientData = { id: number };
 let nextClientId = 1;
+
+/**
+ * Pull the path to the `claude` binary out of a full ps command line.
+ * ps paths can include spaces (e.g. "Application Support") so we match
+ * everything up to and including `/claude` that precedes a space or EOL.
+ */
+function extractClaudePath(cmd: string): string {
+  const m = cmd.match(/(\S(?:[^\n]*?))\/claude(?=\s|$)/);
+  return m ? `${m[1]}/claude` : "claude";
+}
+
+function classifyClaudeSource(claudePath: string, cmd: string): string {
+  if (claudePath.includes("/com.conductor.app/")) return "conductor";
+  if (claudePath.includes("/Claude/claude-code/")) return "desktop";
+  if (claudePath.endsWith("/.bun/bin/claude")) return "agent-dashboard";
+  if (/ --resume /.test(cmd)) return "cli (resumed)";
+  if (/ -p /.test(cmd)) return "cli (headless)";
+  return "cli";
+}
 
 function corsHeaders(): HeadersInit {
   return {
@@ -48,9 +73,26 @@ const server = Bun.serve<ClientData, never>({
       return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
+    // GET /config — app-wide settings
+    if (url.pathname === "/config" && req.method === "GET") {
+      return json(getConfig());
+    }
+
+    // PATCH /config — update app-wide settings
+    if (url.pathname === "/config" && req.method === "PATCH") {
+      const body = (await req.json()) as Partial<import("./lib/config").AppConfig>;
+      return json(updateConfig(body));
+    }
+
     // GET /agents — list
     if (url.pathname === "/agents" && req.method === "GET") {
       return json({ agents: listLive() });
+    }
+
+    // POST /autocommit — run a tick now (for testing or a "commit now" button)
+    if (url.pathname === "/autocommit" && req.method === "POST") {
+      const results = await tickOnce(runningDirsByAgent, onAutoCommitResult);
+      return json({ results });
     }
 
     // GET /claude-procs — enumerate claude CLI processes on this machine and
@@ -67,6 +109,7 @@ const server = Bun.serve<ClientData, never>({
         cpu: number;
         rssMb: number;
         cmd: string;
+        source: string;
       }[] = [];
       for (const line of out.split("\n").slice(1)) {
         const m = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(.*)$/);
@@ -77,13 +120,30 @@ const server = Bun.serve<ClientData, never>({
         const rssKb = Number(m[4]);
         const cmd = m[5];
         if (pid === self) continue;
-        // Match "claude" CLI only: word boundary match, skip the macOS app
-        // bundle and its renderer/GPU helpers.
-        if (!/(^|\/|\s)claude(\s|$)/.test(cmd)) continue;
-        if (/\.app\//.test(cmd)) continue;
+        // Paths in `ps` output can have embedded spaces (e.g., `Application
+        // Support`), so we can't split on whitespace to get the binary.
+        // Instead: the claude CLI binary is always spelled lowercase
+        // `claude`; its path ends with `/claude` and is followed by either
+        // whitespace (args) or end-of-string. The Electron app uses
+        // capital-C `Claude` so case-sensitive matching excludes it.
+        const match = cmd.match(/(^|[/\s])(\S*\/)?claude(\s|$)/);
+        if (!match) continue;
+        // Skip the macOS `disclaimer` launcher wrapper, which shows the
+        // inner claude path as its argument — it would otherwise double-
+        // count alongside the real claude process it spawns.
+        if (/\/disclaimer\s/.test(cmd)) continue;
         if (/Claude Helper/.test(cmd)) continue;
         if (/^(?:ps|grep)\b/.test(cmd)) continue;
-        rows.push({ pid, ppid, cpu, rssMb: Math.round(rssKb / 1024), cmd });
+        // Extract the binary path so we can classify the source.
+        const claudePath = extractClaudePath(cmd);
+        rows.push({
+          pid,
+          ppid,
+          cpu,
+          rssMb: Math.round(rssKb / 1024),
+          cmd,
+          source: classifyClaudeSource(claudePath, cmd),
+        });
       }
       const live = listLive();
       const pidToAgent = new Map<number, string>();
@@ -185,8 +245,39 @@ setInterval(() => {
   broadcast({ type: "agents_snapshot", agents: listLive() });
 }, 5000);
 
+function runningDirsByAgent(): DirsByAgent {
+  const dirs: DirsByAgent = new Map();
+  for (const { agent, runtime } of listLive()) {
+    if (!runtime.alive) continue;
+    const list = dirs.get(agent.workingDir) ?? [];
+    if (!list.includes(agent.name)) list.push(agent.name);
+    dirs.set(agent.workingDir, list);
+  }
+  return dirs;
+}
+
+function onAutoCommitResult(info: import("./lib/types").AutoCommitInfo): void {
+  const tag = info.hash ? ` ${info.hash}` : "";
+  const pushTag = info.pushed
+    ? " pushed"
+    : info.state === "committed"
+      ? " (push failed)"
+      : "";
+  console.log(
+    `[autocommit] ${info.workingDir} → ${info.state}${tag}${pushTag}${
+      info.message ? ` · ${info.message}` : ""
+    }`,
+  );
+  broadcast({ type: "auto_commit", info });
+}
+
+startAutoCommit({
+  getRunningDirs: runningDirsByAgent,
+  onResult: onAutoCommitResult,
+});
+
 function emitFileChange(kind: FileChange["kind"], absPath: string): void {
-  const relPath = path.relative(VAULT, absPath);
+  const relPath = path.relative(getVaultDir(), absPath);
   if (relPath.startsWith(".git") || relPath.startsWith("logs")) return;
   let agentId: string | null = null;
   for (const { agent } of listLive()) {
@@ -202,7 +293,7 @@ function emitFileChange(kind: FileChange["kind"], absPath: string): void {
   });
 }
 
-const fileWatcher = chokidar.watch(VAULT, {
+const fileWatcher = chokidar.watch(getVaultDir(), {
   ignored: (p: string) =>
     p.includes("/.git/") || p.endsWith("/logs") || p.includes("/state/claude.pid"),
   ignoreInitial: true,

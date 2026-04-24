@@ -1,6 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import {
+  AssistantText,
+  LiveDots,
+  ThinkingRow,
+  ToolRow,
+  UserBubble,
+} from "./ChatPieces";
 
 type TextBlock = { type: "text"; text: string };
 type ThinkingBlock = { type: "thinking"; text: string };
@@ -29,8 +42,8 @@ type Entry =
       id: string;
       role: "assistant";
       blocks: AssistantBlock[];
-      blockOrder: string[]; // keys in order of arrival
-      blocksByKey: Record<string, number>; // key → index into blocks
+      blockOrder: string[];
+      blocksByKey: Record<string, number>;
       usage?: UsageInfo;
       error?: string;
       costUsd?: number;
@@ -39,6 +52,13 @@ type Entry =
 
 const HISTORY_KEY = "meta-agent.history.v2";
 const SESSION_KEY = "meta-agent.session.v1";
+const MODEL_LABEL = "claude-sonnet-4-6";
+
+const SUGGESTIONS = [
+  "What agents are running and how are they doing?",
+  "Summarize what each agent has been working on recently.",
+  "Create a new agent in ~/scratch/cleanup that tidies stale markdown files in my vault.",
+];
 
 function uid(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -50,89 +70,6 @@ function tryParseJson(s: string): unknown {
   } catch {
     return undefined;
   }
-}
-
-function ToolUseView({ block }: { block: ToolUseBlock }) {
-  const [open, setOpen] = useState(block.isError === true);
-  const inputObj = block.input ?? tryParseJson(block.partialJson);
-  const inputStr = inputObj
-    ? JSON.stringify(inputObj, null, 2)
-    : block.partialJson || "...";
-  const shortInput =
-    inputObj && typeof inputObj === "object"
-      ? Object.entries(inputObj as Record<string, unknown>)
-          .map(([k, v]) => {
-            const val =
-              typeof v === "string"
-                ? v.length > 40
-                  ? v.slice(0, 40) + "…"
-                  : v
-                : JSON.stringify(v);
-            return `${k}=${val}`;
-          })
-          .join(" ")
-      : "";
-  const running = block.result === undefined;
-  const statusIcon = running
-    ? "⏳"
-    : block.isError
-      ? "⚠️"
-      : "✓";
-  const displayName = block.name.startsWith("mcp__houston__")
-    ? block.name.slice("mcp__houston__".length)
-    : block.name;
-  return (
-    <div className="my-1 rounded border border-zinc-800 bg-zinc-900/60 text-xs">
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex w-full items-start gap-2 px-2 py-1 text-left hover:bg-zinc-800/60"
-      >
-        <span className="font-mono text-zinc-500">{statusIcon}</span>
-        <span className="font-mono text-amber-400">{displayName}</span>
-        {shortInput && (
-          <span className="truncate text-zinc-400">{shortInput}</span>
-        )}
-        <span className="ml-auto text-zinc-600">{open ? "▾" : "▸"}</span>
-      </button>
-      {open && (
-        <div className="border-t border-zinc-800 px-2 py-1 font-mono text-[11px] leading-relaxed text-zinc-300">
-          <div className="text-zinc-500">input</div>
-          <pre className="whitespace-pre-wrap break-all">{inputStr}</pre>
-          {block.result !== undefined && (
-            <>
-              <div className="mt-1 text-zinc-500">
-                result{block.isError ? " (error)" : ""}
-              </div>
-              <pre
-                className={`max-h-64 overflow-auto whitespace-pre-wrap break-all ${
-                  block.isError ? "text-rose-300" : "text-emerald-300"
-                }`}
-              >
-                {block.result}
-              </pre>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ThinkingView({ block }: { block: ThinkingBlock }) {
-  const [open, setOpen] = useState(false);
-  if (!block.text) return null;
-  return (
-    <div className="my-1 text-xs italic text-zinc-500">
-      <button onClick={() => setOpen(!open)} className="hover:text-zinc-300">
-        {open ? "▾" : "▸"} thinking
-      </button>
-      {open && (
-        <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap border-l-2 border-zinc-700 pl-2 text-zinc-500">
-          {block.text}
-        </pre>
-      )}
-    </div>
-  );
 }
 
 type Props = {
@@ -147,9 +84,12 @@ export default function MetaAgentChat({ onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const innerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const stuckRef = useRef(true);
+  const [stuckUI, setStuckUI] = useState(true);
+  const lastScrollTopRef = useRef(0);
 
-  // Load history + session id.
   useEffect(() => {
     try {
       const saved = localStorage.getItem(HISTORY_KEY);
@@ -173,12 +113,52 @@ export default function MetaAgentChat({ onClose }: Props) {
     } catch {}
   }, [sessionId]);
 
-  // Autoscroll.
-  useEffect(() => {
+  const setStuck = (v: boolean) => {
+    if (stuckRef.current !== v) {
+      stuckRef.current = v;
+      setStuckUI(v);
+    }
+  };
+
+  const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
+    const prev = lastScrollTopRef.current;
+    const now = el.scrollTop;
+    const distanceFromBottom = el.scrollHeight - now - el.clientHeight;
+    if (now < prev - 2) setStuck(false);
+    else if (distanceFromBottom < 40) setStuck(true);
+    lastScrollTopRef.current = now;
+  };
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !stuckRef.current) return;
     el.scrollTop = el.scrollHeight;
+    lastScrollTopRef.current = el.scrollTop;
   }, [entries]);
+
+  useEffect(() => {
+    const inner = innerRef.current;
+    const el = scrollRef.current;
+    if (!inner || !el) return;
+    const ro = new ResizeObserver(() => {
+      if (stuckRef.current) {
+        el.scrollTop = el.scrollHeight;
+        lastScrollTopRef.current = el.scrollTop;
+      }
+    });
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, []);
+
+  const jumpToLive = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setStuck(true);
+    el.scrollTop = el.scrollHeight;
+    lastScrollTopRef.current = el.scrollTop;
+  };
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -206,6 +186,8 @@ export default function MetaAgentChat({ onClose }: Props) {
     async (text: string) => {
       if (!text.trim() || streaming) return;
       setError(null);
+      stuckRef.current = true;
+      setStuckUI(true);
       const userEntry: Entry = { id: uid(), role: "user", text };
       const assistantEntry: Entry = {
         id: uid(),
@@ -294,33 +276,36 @@ export default function MetaAgentChat({ onClose }: Props) {
   }, []);
 
   return (
-    <div className="flex h-full flex-col bg-zinc-950">
-      <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2 text-xs">
-        <div className="flex items-center gap-2">
-          <span className="size-2 rounded-full bg-emerald-500" />
-          <span className="font-medium text-zinc-200">meta-agent</span>
-          <span className="text-zinc-500">claude-sonnet-4-6</span>
+    <div className="relative flex h-full flex-col bg-zinc-950">
+      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-zinc-800 px-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-sm font-medium text-zinc-200">
+            Meta
+          </span>
+          <span className="shrink-0 text-[10px] text-zinc-500">
+            {MODEL_LABEL}
+          </span>
           {sessionId && (
             <span
-              className="font-mono text-[10px] text-zinc-600"
+              className="shrink-0 rounded border border-zinc-800 px-1 font-mono text-[10px] text-zinc-600"
               title={sessionId}
             >
               {sessionId.slice(0, 8)}
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-1">
           <button
             onClick={newChat}
-            disabled={streaming}
-            className="text-zinc-500 hover:text-zinc-200 disabled:opacity-40"
-            title="New chat"
+            disabled={streaming || entries.length === 0}
+            className="rounded px-2 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40 disabled:hover:bg-transparent"
+            title="Reset session"
           >
             new
           </button>
           <button
             onClick={onClose}
-            className="text-zinc-500 hover:text-zinc-200"
+            className="rounded px-2 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
             title="Close (Esc)"
           >
             ✕
@@ -328,70 +313,45 @@ export default function MetaAgentChat({ onClose }: Props) {
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3 text-sm">
-        {entries.length === 0 && (
-          <div className="space-y-2 text-xs text-zinc-500">
-            <div className="font-medium text-zinc-400">
-              I run as a local claude code instance — your OAuth, not an API key.
-              Ask me anything about your agents.
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="flex-1 overflow-y-auto px-4 py-5"
+      >
+        <div ref={innerRef} className="mx-auto max-w-2xl space-y-4">
+          {entries.length === 0 && (
+            <EmptyState onPick={(s) => setInput(s)} />
+          )}
+          {entries.map((e) => (
+            <MessageView key={e.id} entry={e} streaming={streaming} />
+          ))}
+          {streaming &&
+            entries[entries.length - 1]?.role === "assistant" &&
+            (entries[entries.length - 1] as Entry & { role: "assistant" })
+              .blocks.length === 0 && (
+              <div className="flex items-center gap-2 text-[11px] italic text-zinc-500">
+                <LiveDots /> thinking…
+              </div>
+            )}
+          {error && !streaming && (
+            <div className="rounded border border-rose-900 bg-rose-950/40 px-2 py-1 text-xs text-rose-300">
+              {error}
             </div>
-            <div className="text-zinc-600">Try:</div>
-            <ul className="space-y-1 pl-2">
-              <li className="hover:text-zinc-400">
-                <button
-                  onClick={() =>
-                    setInput("What agents are running and how are they doing?")
-                  }
-                  className="text-left"
-                >
-                  • What agents are running and how are they doing?
-                </button>
-              </li>
-              <li className="hover:text-zinc-400">
-                <button
-                  onClick={() =>
-                    setInput(
-                      "Summarize what each agent has been working on recently.",
-                    )
-                  }
-                  className="text-left"
-                >
-                  • Summarize what each agent has been up to.
-                </button>
-              </li>
-              <li className="hover:text-zinc-400">
-                <button
-                  onClick={() =>
-                    setInput(
-                      "Create a new agent in ~/scratch/cleanup that tidies stale markdown files in my vault.",
-                    )
-                  }
-                  className="text-left"
-                >
-                  • Create a new agent that…
-                </button>
-              </li>
-            </ul>
-            <div className="pt-3 text-zinc-600">
-              Slash commands: <code>/new</code> (reset session)
-            </div>
-          </div>
-        )}
-        {entries.map((e) => (
-          <MessageView key={e.id} entry={e} />
-        ))}
-        {streaming && (
-          <div className="mt-2 text-xs text-zinc-500">…</div>
-        )}
-        {error && !streaming && (
-          <div className="mt-2 rounded border border-rose-900 bg-rose-950/50 px-2 py-1 text-xs text-rose-300">
-            {error}
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
-      <form onSubmit={onSubmit} className="border-t border-zinc-800 p-2">
-        <div className="relative">
+      {!stuckUI && (
+        <button
+          onClick={jumpToLive}
+          className="absolute bottom-28 right-4 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-200 shadow-lg hover:bg-zinc-800"
+        >
+          ↓ jump to live
+        </button>
+      )}
+
+      <form onSubmit={onSubmit} className="shrink-0 border-t border-zinc-800 p-2">
+        <div className="relative rounded-lg border border-zinc-800 bg-zinc-900 transition focus-within:border-emerald-800/60">
           <textarea
             ref={inputRef}
             value={input}
@@ -408,26 +368,26 @@ export default function MetaAgentChat({ onClose }: Props) {
                 : "Ask about your agents…"
             }
             rows={2}
-            className="w-full resize-none rounded border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+            className="w-full resize-none bg-transparent px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-600"
             disabled={streaming}
           />
-          <div className="mt-1 flex items-center justify-between text-[10px] text-zinc-600">
+          <div className="flex items-center justify-between border-t border-zinc-800 px-2 py-1 text-[10px] text-zinc-600">
             <span>Enter to send · Shift+Enter for newline</span>
             {streaming ? (
               <button
                 type="button"
                 onClick={cancel}
-                className="rounded border border-zinc-700 px-1.5 py-0.5 hover:bg-zinc-800"
+                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800"
               >
-                cancel
+                stop
               </button>
             ) : (
               <button
                 type="submit"
                 disabled={!input.trim()}
-                className="rounded border border-zinc-700 px-1.5 py-0.5 hover:bg-zinc-800 disabled:opacity-40"
+                className="rounded bg-emerald-700 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-600 disabled:opacity-40 disabled:hover:bg-emerald-700"
               >
-                send
+                send →
               </button>
             )}
           </div>
@@ -437,54 +397,77 @@ export default function MetaAgentChat({ onClose }: Props) {
   );
 }
 
-function MessageView({ entry }: { entry: Entry }) {
-  if (entry.role === "user") {
-    return (
-      <div className="mb-3">
-        <div className="text-[10px] uppercase tracking-wide text-zinc-600">
-          you
-        </div>
-        <div className="whitespace-pre-wrap text-zinc-200">{entry.text}</div>
-      </div>
-    );
-  }
+function EmptyState({ onPick }: { onPick: (s: string) => void }) {
   return (
-    <div className="mb-3">
-      <div className="text-[10px] uppercase tracking-wide text-zinc-600">
-        meta-agent
+    <div className="space-y-3">
+      <div className="flex flex-col gap-1.5">
+        {SUGGESTIONS.map((s) => (
+          <button
+            key={s}
+            onClick={() => onPick(s)}
+            className="group flex items-start gap-2 rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-left text-[12px] text-zinc-400 transition hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-200"
+          >
+            <span className="text-zinc-600 group-hover:text-emerald-500">
+              →
+            </span>
+            <span className="min-w-0 flex-1">{s}</span>
+          </button>
+        ))}
       </div>
+      <div className="text-[10px] text-zinc-600">
+        Slash commands:{" "}
+        <code className="rounded bg-zinc-800 px-1 py-0.5 font-mono text-zinc-400">
+          /new
+        </code>{" "}
+        reset session
+      </div>
+    </div>
+  );
+}
+
+function MessageView({
+  entry,
+  streaming,
+}: {
+  entry: Entry;
+  streaming: boolean;
+}) {
+  if (entry.role === "user") {
+    return <UserBubble>{entry.text}</UserBubble>;
+  }
+
+  return (
+    <div className="space-y-2">
       {entry.blocks.map((b, i) => {
         if (b.type === "text") {
-          return (
-            <div key={i} className="whitespace-pre-wrap text-zinc-100">
-              {b.text}
-            </div>
-          );
+          return <AssistantText key={i} text={b.text} />;
         }
         if (b.type === "thinking") {
-          return <ThinkingView key={i} block={b} />;
+          return <ThinkingRow key={i} text={b.text} />;
         }
-        return <ToolUseView key={i} block={b} />;
+        const parsedInput =
+          b.input !== undefined
+            ? (b.input as Record<string, unknown>)
+            : (tryParseJson(b.partialJson) as
+                | Record<string, unknown>
+                | undefined);
+        return (
+          <ToolRow
+            key={i}
+            name={b.name}
+            input={parsedInput}
+            partialJson={b.partialJson}
+            result={
+              b.result !== undefined
+                ? { content: b.result, isError: b.isError === true }
+                : null
+            }
+            running={b.result === undefined && streaming}
+          />
+        );
       })}
       {entry.error && (
-        <div className="mt-1 text-xs text-rose-400">error: {entry.error}</div>
-      )}
-      {(entry.usage || entry.costUsd !== undefined) && (
-        <div className="mt-1 text-[10px] text-zinc-600">
-          {entry.usage?.input_tokens !== undefined && (
-            <>in {entry.usage.input_tokens} · </>
-          )}
-          {entry.usage?.output_tokens !== undefined && (
-            <>out {entry.usage.output_tokens}</>
-          )}
-          {entry.usage?.cache_read ? ` · cache ${entry.usage.cache_read}` : ""}
-          {entry.costUsd !== undefined && (
-            <> · ${entry.costUsd.toFixed(4)}</>
-          )}
-          {entry.durationMs !== undefined && (
-            <> · {(entry.durationMs / 1000).toFixed(1)}s</>
-          )}
-        </div>
+        <div className="text-xs text-rose-400">error: {entry.error}</div>
       )}
     </div>
   );
@@ -500,9 +483,7 @@ function upsertBlock(
   key: string,
   block: AssistantBlock,
 ): Entry {
-  if (entry.blocksByKey[key] !== undefined) {
-    return entry;
-  }
+  if (entry.blocksByKey[key] !== undefined) return entry;
   const blocks = [...entry.blocks, block];
   return {
     ...entry,
@@ -550,7 +531,9 @@ function handleEvent(
       break;
     case "text_start":
       if (key)
-        patch(entryId, (a) => upsertBlock(a, key, { type: "text", text: "" }));
+        patch(entryId, (a) =>
+          upsertBlock(a, key, { type: "text", text: "" }),
+        );
       break;
     case "thinking_start":
       if (key)
@@ -620,7 +603,6 @@ function handleEvent(
       break;
     }
     case "block_stop":
-      // Finalize tool input JSON parse.
       if (key)
         patch(entryId, (a) =>
           mutateBlock(a, key, (b) =>

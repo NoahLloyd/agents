@@ -12,10 +12,18 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const FAVICON_SVG =
+  `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>` +
+  `<rect width='32' height='32' rx='7' fill='%2309090b'/>` +
+  `<circle cx='8' cy='16' r='3' fill='%2334d399'/>` +
+  `<circle cx='16' cy='16' r='3' fill='%23a1a1aa'/>` +
+  `<circle cx='24' cy='16' r='3' fill='%23a1a1aa'/>` +
+  `</svg>`;
+
 export const metadata: Metadata = {
   title: "agents",
   description: "",
-  icons: { icon: "data:image/svg+xml;utf8,<svg/>" },
+  icons: { icon: `data:image/svg+xml;utf8,${FAVICON_SVG}` },
 };
 
 export default function RootLayout({

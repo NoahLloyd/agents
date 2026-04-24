@@ -10,7 +10,14 @@ export function parseLine(line: string): TranscriptEvent[] {
   } catch {
     return [];
   }
-  const ts = Date.now();
+  // The JSONL stores each event's real wall-clock time as an ISO string.
+  // Fall back to "now" only when the field is missing (shouldn't happen,
+  // but keeps us safe for malformed lines).
+  let ts = Date.now();
+  if (typeof raw.timestamp === "string") {
+    const parsed = Date.parse(raw.timestamp);
+    if (Number.isFinite(parsed)) ts = parsed;
+  }
   const t = raw.type as string | undefined;
 
   if (t === "system") {

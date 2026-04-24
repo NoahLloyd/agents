@@ -1,11 +1,25 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import type { Agent, TranscriptEvent } from "@/lib/types";
+import { Settings } from "lucide-react";
+import type { Agent, AgentRuntime, TranscriptEvent } from "@/lib/types";
+import {
+  AssistantText,
+  LiveDots,
+  ThinkingRow,
+  ToolRow,
+  UserBubble,
+} from "./ChatPieces";
 
 type Turn =
   | { kind: "direction"; text: string; fileMode: boolean }
+  | {
+      kind: "time";
+      ts: number;
+      gapSec: number | null;
+      showDate: boolean;
+      key: string;
+    }
   | { kind: "text"; text: string; ts: number; key: string }
   | { kind: "thinking"; text: string; ts: number; key: string }
   | {
@@ -17,31 +31,14 @@ type Turn =
       key: string;
     };
 
-function summarize(name: string, input: Record<string, unknown>): string {
-  if (name === "Bash" && typeof input.command === "string") {
-    return input.command.split("\n")[0].slice(0, 120);
-  }
-  if ((name === "Read" || name === "Write" || name === "Edit" || name === "NotebookEdit") && typeof input.file_path === "string") {
-    return shortPath(input.file_path);
-  }
-  if (name === "Grep" && typeof input.pattern === "string") {
-    const extra = typeof input.path === "string" ? ` in ${shortPath(input.path)}` : "";
-    return input.pattern + extra;
-  }
-  if (name === "Glob" && typeof input.pattern === "string") return input.pattern;
-  if (name === "WebFetch" && typeof input.url === "string") return input.url;
-  if (name === "WebSearch" && typeof input.query === "string") return input.query;
-  if (name === "Task" && typeof input.description === "string") return input.description;
-  if (name === "TodoWrite") return "update todo list";
-  if (typeof input.description === "string") return input.description;
-  if (typeof input.prompt === "string") return input.prompt.slice(0, 120);
-  return "";
-}
+// Insert a time marker roughly every this many seconds. If events are
+// dense, markers appear at this cadence. If there's a pause longer than
+// this, the next event just gets one marker (we don't fill empty minutes).
+const TIME_MARKER_INTERVAL_SEC = 300;
 
-function shortPath(p: string): string {
-  const parts = p.split("/");
-  if (parts.length <= 3) return p;
-  return "…/" + parts.slice(-2).join("/");
+function dateKey(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
 
 function fmtUptime(sec: number | null): string {
@@ -54,7 +51,37 @@ function fmtUptime(sec: number | null): string {
   return `${s}s`;
 }
 
-function buildTurns(events: TranscriptEvent[], direction: Agent["direction"] | null): Turn[] {
+function fmtCountdown(target: number | null): string | null {
+  if (!target) return null;
+  const sec = Math.max(0, Math.floor((target - Date.now()) / 1000));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function resolveStatus({
+  running,
+  scheduledRestartAt,
+  enabled,
+  hasAgent,
+}: {
+  running: boolean;
+  scheduledRestartAt: number | null;
+  enabled: boolean;
+  hasAgent: boolean;
+}): { label: string; labelClass: string } {
+  if (!hasAgent) return { label: "no agent", labelClass: "text-zinc-500" };
+  if (running) return { label: "running", labelClass: "text-emerald-400" };
+  if (scheduledRestartAt)
+    return { label: "waiting", labelClass: "text-amber-300" };
+  if (enabled) return { label: "dead", labelClass: "text-red-400" };
+  return { label: "stopped", labelClass: "text-zinc-500" };
+}
+
+function buildTurns(
+  events: TranscriptEvent[],
+  direction: Agent["direction"] | null,
+): Turn[] {
   const turns: Turn[] = [];
   if (direction) {
     if (direction.kind === "inline") {
@@ -64,18 +91,52 @@ function buildTurns(events: TranscriptEvent[], direction: Agent["direction"] | n
     }
   }
 
-  // Pass 1: collect tool_results by toolUseId so we can attach.
-  const resultByToolId = new Map<string, { content: string; isError: boolean }>();
+  const resultByToolId = new Map<
+    string,
+    { content: string; isError: boolean }
+  >();
   for (const ev of events) {
     if (ev.kind === "tool_result") {
-      resultByToolId.set(ev.toolUseId, { content: ev.content, isError: ev.isError });
+      resultByToolId.set(ev.toolUseId, {
+        content: ev.content,
+        isError: ev.isError,
+      });
     }
   }
 
-  // Pass 2: emit turns in order, skipping tool_result/system/result.
   let i = 0;
+  let lastMarkerTs: number | null = null;
+  let prevDateKey: string | null = null;
+  const todayKey = dateKey(Date.now());
   for (const ev of events) {
     const key = `${ev.ts}-${i++}`;
+    const isRendered =
+      ev.kind === "text" || ev.kind === "thinking" || ev.kind === "tool_use";
+    if (isRendered) {
+      const evDateKey = dateKey(ev.ts);
+      const isFirst = lastMarkerTs === null;
+      const gapFromMarker = isFirst
+        ? null
+        : Math.round((ev.ts - (lastMarkerTs as number)) / 1000);
+      const intervalCrossed =
+        gapFromMarker !== null && gapFromMarker >= TIME_MARKER_INTERVAL_SEC;
+      const dateChanged = prevDateKey !== null && evDateKey !== prevDateKey;
+      if (isFirst || intervalCrossed || dateChanged) {
+        // Show the date on the first marker if it's not today, and any
+        // time the date changes (e.g., a gap that crosses midnight).
+        const showDate =
+          dateChanged || (isFirst && evDateKey !== todayKey);
+        turns.push({
+          kind: "time",
+          ts: ev.ts,
+          gapSec: gapFromMarker,
+          showDate,
+          key: `t-${key}`,
+        });
+        lastMarkerTs = ev.ts;
+        prevDateKey = evDateKey;
+      }
+    }
     if (ev.kind === "text") {
       turns.push({ kind: "text", text: ev.text, ts: ev.ts, key });
     } else if (ev.kind === "thinking") {
@@ -90,7 +151,6 @@ function buildTurns(events: TranscriptEvent[], direction: Agent["direction"] | n
         key,
       });
     }
-    // system/result/tool_result: hidden from the chat view.
   }
   return turns;
 }
@@ -98,16 +158,20 @@ function buildTurns(events: TranscriptEvent[], direction: Agent["direction"] | n
 export default function Transcript({
   events,
   agent,
-  running,
-  uptimeSec,
-  sessionPath,
+  runtime,
+  onOpenSettings,
 }: {
   events: TranscriptEvent[];
   agent: Agent | null;
-  running: boolean;
-  uptimeSec: number | null;
-  sessionPath: string | null;
+  runtime: AgentRuntime | null;
+  onOpenSettings?: () => void;
 }) {
+  const running = runtime?.alive ?? false;
+  const uptimeSec = runtime?.uptimeSec ?? null;
+  const sessionPath = runtime?.sessionPath ?? null;
+  const pid = runtime?.pid ?? null;
+  const scheduledRestartAt = runtime?.scheduledRestartAt ?? null;
+  const enabled = agent?.enabled ?? false;
   const scrollRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
   const stuckRef = useRef(true);
@@ -177,18 +241,55 @@ export default function Transcript({
     return { tools, chars };
   }, [events]);
 
+  const countdown = fmtCountdown(scheduledRestartAt);
+  const statusInfo = resolveStatus({
+    running,
+    scheduledRestartAt,
+    enabled,
+    hasAgent: agent !== null,
+  });
+  const sessionShort = sessionPath
+    ? (sessionPath.split("/").pop()?.split(".")[0]?.slice(0, 8) ?? "")
+    : "";
+
   return (
     <div className="relative flex h-full flex-col bg-zinc-950">
-      <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2">
-        <div className="min-w-0 text-sm font-medium text-zinc-200 truncate">
-          {agent?.name ?? "no agent selected"}
-        </div>
-        <div
-          className="ml-4 shrink-0 truncate max-w-[55%] text-[11px] font-mono text-zinc-600"
-          title={sessionPath ?? undefined}
+      <div className="flex h-9 shrink-0 items-center gap-3 border-b border-zinc-800 px-4 text-[11px]">
+        <span
+          className={`shrink-0 font-medium ${statusInfo.labelClass} ${
+            running ? "animate-pulse" : ""
+          }`}
         >
-          {sessionPath?.split("/").pop() ?? ""}
-        </div>
+          {statusInfo.label}
+        </span>
+        {countdown && (
+          <span className="shrink-0 text-amber-400">auto-resume {countdown}</span>
+        )}
+        {running && uptimeSec !== null && (
+          <span className="shrink-0 font-mono text-zinc-500">
+            {fmtUptime(uptimeSec)}
+          </span>
+        )}
+        {pid !== null && (
+          <span className="shrink-0 font-mono text-zinc-600">pid {pid}</span>
+        )}
+        {sessionShort && (
+          <span
+            className="ml-auto shrink-0 font-mono text-zinc-600"
+            title={sessionPath ?? undefined}
+          >
+            {sessionShort}
+          </span>
+        )}
+        {agent && onOpenSettings && (
+          <button
+            onClick={onOpenSettings}
+            className={`shrink-0 rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 ${sessionShort ? "" : "ml-auto"}`}
+            title="Agent settings"
+          >
+            <Settings size={13} strokeWidth={2} />
+          </button>
+        )}
       </div>
 
       <div
@@ -203,7 +304,9 @@ export default function Transcript({
             </div>
           )}
           {agent && turns.length === 0 && (
-            <div className="text-sm italic text-zinc-600">waiting for events…</div>
+            <div className="text-sm italic text-zinc-600">
+              waiting for events…
+            </div>
           )}
           {turns.map((t, idx) => (
             <TurnView key={"key" in t ? t.key : `dir-${idx}`} turn={t} />
@@ -214,200 +317,118 @@ export default function Transcript({
       {!stuckUI && (
         <button
           onClick={jumpToLive}
-          className="absolute bottom-16 right-4 rounded-full bg-zinc-800 px-3 py-1 text-xs text-zinc-200 shadow-lg hover:bg-zinc-700"
+          className="absolute bottom-16 right-4 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-200 shadow-lg hover:bg-zinc-800"
         >
           ↓ jump to live
         </button>
       )}
 
-      <div className="flex items-center gap-3 h-7 px-4 border-t border-zinc-800 text-[11px] font-mono text-zinc-500">
-        <span className="flex items-center gap-1.5">
-          <span
-            className={`inline-block w-1.5 h-1.5 rounded-full ${
-              running ? "bg-emerald-500 animate-pulse" : "bg-zinc-700"
-            }`}
-          />
-          {running ? "running" : "idle"}
-        </span>
-        <span>{fmtUptime(uptimeSec)}</span>
+      <div className="flex h-6 items-center gap-3 border-t border-zinc-800 px-4 font-mono text-[10px] text-zinc-600">
         <span>{events.length} evt</span>
         <span>
           {counts.tools} tool{counts.tools === 1 ? "" : "s"}
         </span>
         <span>{counts.chars.toLocaleString()} chars</span>
+        {running && (
+          <span className="ml-auto flex items-center gap-1">
+            <LiveDots />
+          </span>
+        )}
       </div>
     </div>
   );
 }
 
 function TurnView({ turn }: { turn: Turn }) {
-  if (turn.kind === "direction") return <DirectionBubble text={turn.text} fileMode={turn.fileMode} />;
+  if (turn.kind === "direction")
+    return <DirectionBubble text={turn.text} fileMode={turn.fileMode} />;
+  if (turn.kind === "time")
+    return (
+      <TimeMarker
+        ts={turn.ts}
+        gapSec={turn.gapSec}
+        showDate={turn.showDate}
+      />
+    );
   if (turn.kind === "text") return <AssistantText text={turn.text} />;
-  if (turn.kind === "thinking") return <ThinkingBlock text={turn.text} />;
-  return <ToolRow turn={turn} />;
+  if (turn.kind === "thinking")
+    return <ThinkingRow text={turn.text} ts={turn.ts} />;
+  return (
+    <ToolRow
+      name={turn.name}
+      input={turn.input}
+      result={turn.result}
+      ts={turn.ts}
+    />
+  );
+}
+
+function fmtTimeOfDay(ts: number): string {
+  return new Date(ts).toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function fmtShortDate(ts: number): string {
+  return new Date(ts).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function fmtGap(sec: number): string {
+  if (sec < 60) return `+${sec}s`;
+  const m = Math.floor(sec / 60);
+  if (m < 60) return `+${m}m`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem ? `+${h}h${rem}m` : `+${h}h`;
+}
+
+function TimeMarker({
+  ts,
+  gapSec,
+  showDate,
+}: {
+  ts: number;
+  gapSec: number | null;
+  showDate: boolean;
+}) {
+  // Only surface the gap label when the pause is clearly longer than the
+  // regular cadence — otherwise every routine marker would say "+5m".
+  const showGap =
+    gapSec !== null && gapSec >= TIME_MARKER_INTERVAL_SEC * 1.5;
+  return (
+    <div
+      className="flex items-center gap-3 py-1 text-[10px] font-mono text-zinc-600 select-none"
+      aria-hidden
+    >
+      <span className="h-px flex-1 bg-zinc-800" />
+      <span className="shrink-0">
+        {showDate && (
+          <span className="mr-1.5 text-zinc-500">{fmtShortDate(ts)}</span>
+        )}
+        {fmtTimeOfDay(ts)}
+        {showGap && (
+          <span className="ml-1.5 text-zinc-700">{fmtGap(gapSec!)}</span>
+        )}
+      </span>
+      <span className="h-px flex-1 bg-zinc-800" />
+    </div>
+  );
 }
 
 function DirectionBubble({ text, fileMode }: { text: string; fileMode: boolean }) {
   return (
-    <div className="flex justify-end">
-      <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-zinc-800 text-zinc-100 px-3.5 py-2 text-[13px] leading-relaxed whitespace-pre-wrap">
-        {fileMode && (
-          <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
-            reading file each turn
-          </div>
-        )}
-        {fileMode ? <code className="font-mono">{text}</code> : text}
-      </div>
-    </div>
-  );
-}
-
-function ThinkingBlock({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
-  const preview = text.split("\n")[0].slice(0, 200);
-  return (
-    <div className="text-[12px] italic text-zinc-500">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex items-baseline gap-1.5 w-full text-left hover:text-zinc-300"
-      >
-        <span
-          className={`inline-block w-3 text-center transition-transform shrink-0 not-italic text-zinc-600 ${open ? "rotate-90" : ""}`}
-        >
-          ▸
-        </span>
-        <span className="text-[10px] uppercase tracking-wider not-italic text-zinc-600 shrink-0">
-          thinking
-        </span>
-        {!open && <span className="min-w-0 flex-1 truncate">{preview}</span>}
-      </button>
-      {open && (
-        <div className="mt-1 ml-5 border-l border-zinc-800 pl-3 whitespace-pre-wrap text-zinc-400">
-          {text}
+    <UserBubble>
+      {fileMode && (
+        <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
+          reading file each turn
         </div>
       )}
-    </div>
-  );
-}
-
-function AssistantText({ text }: { text: string }) {
-  return (
-    <div className="text-[13px] leading-relaxed text-zinc-200">
-      <ReactMarkdown
-        components={{
-          p: (props) => <p className="mb-2 last:mb-0" {...props} />,
-          strong: (props) => <strong className="font-semibold text-white" {...props} />,
-          em: (props) => <em className="italic" {...props} />,
-          h1: (props) => <h1 className="text-[15px] font-semibold text-white mt-3 mb-2" {...props} />,
-          h2: (props) => <h2 className="text-[14px] font-semibold text-white mt-3 mb-1.5" {...props} />,
-          h3: (props) => <h3 className="text-[13px] font-semibold text-white mt-2 mb-1" {...props} />,
-          ul: (props) => <ul className="list-disc pl-5 my-2 space-y-0.5 marker:text-zinc-600" {...props} />,
-          ol: (props) => <ol className="list-decimal pl-5 my-2 space-y-0.5 marker:text-zinc-600" {...props} />,
-          li: (props) => <li className="leading-relaxed" {...props} />,
-          blockquote: (props) => (
-            <blockquote className="border-l-2 border-zinc-700 pl-3 my-2 text-zinc-400" {...props} />
-          ),
-          a: (props) => (
-            <a
-              className="text-emerald-400 underline hover:text-emerald-300"
-              target="_blank"
-              rel="noopener noreferrer"
-              {...props}
-            />
-          ),
-          code: ({ className, children, ...props }) => {
-            const inline = !className;
-            if (inline) {
-              return (
-                <code
-                  className="px-1 py-0.5 rounded bg-zinc-800 text-[12px] text-zinc-200 font-mono"
-                  {...props}
-                >
-                  {children}
-                </code>
-              );
-            }
-            return (
-              <code
-                className="block px-3 py-2 rounded bg-zinc-900 border border-zinc-800 text-[12px] font-mono text-zinc-200 overflow-x-auto"
-                {...props}
-              >
-                {children}
-              </code>
-            );
-          },
-          pre: ({ children, ...props }) => (
-            <pre className="my-2" {...props}>
-              {children}
-            </pre>
-          ),
-          table: (props) => (
-            <div className="my-2 overflow-x-auto">
-              <table className="border-collapse text-[12px] w-full" {...props} />
-            </div>
-          ),
-          th: (props) => (
-            <th className="border border-zinc-700 px-2 py-1 text-left bg-zinc-900 font-semibold" {...props} />
-          ),
-          td: (props) => <td className="border border-zinc-700 px-2 py-1" {...props} />,
-        }}
-      >
-        {text}
-      </ReactMarkdown>
-    </div>
-  );
-}
-
-function ToolRow({ turn }: { turn: Extract<Turn, { kind: "tool" }> }) {
-  const [open, setOpen] = useState(false);
-  const summary = summarize(turn.name, turn.input);
-  const hasResult = turn.result !== null;
-  const isError = turn.result?.isError ?? false;
-  const inputJson = useMemo(
-    () => JSON.stringify(turn.input, null, 2),
-    [turn.input],
-  );
-
-  return (
-    <div className="text-[11px] font-mono text-zinc-500">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="group flex items-start gap-1.5 w-full text-left hover:text-zinc-300"
-      >
-        <span
-          className={`inline-block w-3 text-center transition-transform shrink-0 ${open ? "rotate-90" : ""}`}
-        >
-          ▸
-        </span>
-        <span className={`shrink-0 ${isError ? "text-red-400" : "text-emerald-400"}`}>
-          {turn.name}
-        </span>
-        <span className="truncate opacity-70">{summary}</span>
-        {hasResult && isError && (
-          <span className="ml-auto shrink-0 text-red-400">error</span>
-        )}
-      </button>
-      {open && (
-        <div className="mt-1 ml-4 space-y-1">
-          <pre className="px-2 py-1.5 rounded bg-zinc-900 border border-zinc-800 whitespace-pre-wrap break-all text-[11px] text-zinc-300 max-h-64 overflow-auto">
-            {inputJson}
-          </pre>
-          {turn.result && (
-            <div>
-              <div className="text-[10px] uppercase tracking-wider text-zinc-600 mb-0.5">
-                result{isError ? " (error)" : ""}
-              </div>
-              <pre
-                className={`px-2 py-1.5 rounded bg-zinc-900 border whitespace-pre-wrap break-all text-[11px] max-h-64 overflow-auto ${
-                  isError ? "border-red-900 text-red-300" : "border-zinc-800 text-zinc-400"
-                }`}
-              >
-                {turn.result.content}
-              </pre>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+      {fileMode ? <code className="font-mono">{text}</code> : text}
+    </UserBubble>
   );
 }

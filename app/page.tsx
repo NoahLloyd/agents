@@ -1,18 +1,22 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import StatusHeader from "@/components/StatusHeader";
 import Transcript from "@/components/Transcript";
 import FileActivity from "@/components/FileActivity";
 import PinnedNotes from "@/components/PinnedNotes";
 import AgentSidebar from "@/components/AgentSidebar";
 import NewAgentDialog from "@/components/NewAgentDialog";
 import MetaAgentChat from "@/components/MetaAgentChat";
+import TabBar, { type Tab } from "@/components/TabBar";
+import FileViewer from "@/components/FileViewer";
+import SettingsPage from "@/components/SettingsPage";
+import AgentSettingsModal from "@/components/AgentSettingsModal";
 import { useWs } from "@/lib/use-ws";
 import { api, WS_URL } from "@/lib/api";
 import type {
   Agent,
   AgentRuntime,
+  AutoCommitInfo,
   TranscriptEvent,
   FileChange,
   WsMessage,
@@ -24,6 +28,20 @@ const META_OPEN_KEY = "meta-agent.open.v1";
 
 type AgentEntry = { agent: Agent; runtime: AgentRuntime };
 
+type TabState =
+  | { id: string; kind: "agent"; agentId: string }
+  | {
+      id: string;
+      kind: "file";
+      workingDir: string;
+      hash: string;
+      filePath: string | null;
+    };
+
+function uid(): string {
+  return Math.random().toString(36).slice(2, 10);
+}
+
 export default function Home() {
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -31,6 +49,11 @@ export default function Home() {
   const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
   const [showNew, setShowNew] = useState(false);
   const [metaOpen, setMetaOpen] = useState(false);
+  const [tabs, setTabs] = useState<TabState[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [commitByDir, setCommitByDir] = useState<Record<string, AutoCommitInfo>>({});
+  const [showGlobalSettings, setShowGlobalSettings] = useState(false);
+  const [agentSettingsId, setAgentSettingsId] = useState<string | null>(null);
   const [, setTick] = useState(0);
 
   // Load + persist meta-agent open state.
@@ -121,6 +144,15 @@ export default function Home() {
       });
     } else if (m.type === "file") {
       setFileChanges((prev) => [...prev, m.change]);
+    } else if (m.type === "auto_commit") {
+      setCommitByDir((prev) => ({ ...prev, [m.info.workingDir]: m.info }));
+    } else if (m.type === "session_reset") {
+      setEventsByAgent((prev) => {
+        if (!prev[m.agentId]) return prev;
+        const next = { ...prev };
+        next[m.agentId] = [];
+        return next;
+      });
     }
   });
 
@@ -128,6 +160,34 @@ export default function Home() {
   useEffect(() => {
     if (!selectedId && agents.length > 0) setSelectedId(agents[0].agent.id);
   }, [agents, selectedId]);
+
+  useEffect(() => {
+    setTabs((prev) => {
+      const filtered = prev.filter(
+        (t) => t.kind !== "agent" || agents.some((a) => a.agent.id === t.agentId),
+      );
+      return filtered.length === prev.length ? prev : filtered;
+    });
+  }, [agents]);
+
+  // Seed an initial agent tab once agents have loaded.
+  useEffect(() => {
+    if (tabs.length > 0) return;
+    if (agents.length === 0) return;
+    const initialId =
+      selectedId && agents.some((a) => a.agent.id === selectedId)
+        ? selectedId
+        : agents[0].agent.id;
+    const t: TabState = { id: uid(), kind: "agent", agentId: initialId };
+    setTabs([t]);
+    setActiveTabId(t.id);
+  }, [agents, tabs.length, selectedId]);
+
+  useEffect(() => {
+    if (activeTabId && !tabs.some((t) => t.id === activeTabId)) {
+      setActiveTabId(tabs[0]?.id ?? null);
+    }
+  }, [tabs, activeTabId]);
 
   // Lazy-load transcript history for newly selected agent if we have none.
   useEffect(() => {
@@ -149,45 +209,204 @@ export default function Home() {
     [agents, selectedId],
   );
 
-  const selectedEvents = selectedId ? (eventsByAgent[selectedId] ?? []) : [];
+  const activeTab = useMemo(
+    () => tabs.find((t) => t.id === activeTabId) ?? null,
+    [tabs, activeTabId],
+  );
 
-  const liveChangesForAgent = selected
+  const activeAgentEntry = useMemo(() => {
+    if (activeTab?.kind !== "agent") return null;
+    return agents.find((a) => a.agent.id === activeTab.agentId) ?? null;
+  }, [activeTab, agents]);
+
+  const tabsForBar: Tab[] = useMemo(
+    () =>
+      tabs.map((t): Tab => {
+        if (t.kind === "agent") {
+          const a = agents.find((x) => x.agent.id === t.agentId)?.agent;
+          return {
+            id: t.id,
+            kind: "agent",
+            agentId: t.agentId,
+            label: a?.name ?? "(removed)",
+          };
+        }
+        const name =
+          t.filePath?.split("/").pop() ??
+          (t.hash === "WORKING" ? "working tree" : t.hash.slice(0, 7));
+        return {
+          id: t.id,
+          kind: "file",
+          workingDir: t.workingDir,
+          hash: t.hash,
+          filePath: t.filePath,
+          label: name,
+        };
+      }),
+    [tabs, agents],
+  );
+
+  const activeAgentEvents =
+    activeTab?.kind === "agent"
+      ? (eventsByAgent[activeTab.agentId] ?? [])
+      : [];
+
+  const liveChangesForSidebar = selected
     ? fileChanges.filter((c) =>
         c.path.startsWith(selected.agent.workingDir + "/"),
       )
     : [];
 
+  const onSidebarSelect = (agentId: string) => {
+    setSelectedId(agentId);
+    const existing = tabs.find(
+      (t) => t.kind === "agent" && t.agentId === agentId,
+    );
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    const active = tabs.find((t) => t.id === activeTabId);
+    if (active && active.kind === "agent") {
+      setTabs((prev) =>
+        prev.map((t) => (t.id === active.id ? { ...t, agentId } : t)),
+      );
+      return;
+    }
+    const lastAgentTab = [...tabs].reverse().find((t) => t.kind === "agent");
+    if (lastAgentTab) {
+      setTabs((prev) =>
+        prev.map((t) => (t.id === lastAgentTab.id ? { ...t, agentId } : t)),
+      );
+      setActiveTabId(lastAgentTab.id);
+      return;
+    }
+    const t: TabState = { id: uid(), kind: "agent", agentId };
+    setTabs((prev) => [...prev, t]);
+    setActiveTabId(t.id);
+  };
+
+  const onSidebarOpenInNewTab = (agentId: string) => {
+    setSelectedId(agentId);
+    const t: TabState = { id: uid(), kind: "agent", agentId };
+    setTabs((prev) => [...prev, t]);
+    setActiveTabId(t.id);
+  };
+
+  const onOpenFile = (f: {
+    workingDir: string;
+    hash: string;
+    filePath: string | null;
+  }) => {
+    const existing = tabs.find(
+      (t) =>
+        t.kind === "file" &&
+        t.workingDir === f.workingDir &&
+        t.hash === f.hash &&
+        t.filePath === f.filePath,
+    );
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    const t: TabState = { id: uid(), kind: "file", ...f };
+    setTabs((prev) => [...prev, t]);
+    setActiveTabId(t.id);
+  };
+
+  const onActivateTab = (id: string) => {
+    setActiveTabId(id);
+    const t = tabs.find((x) => x.id === id);
+    if (t?.kind === "agent") setSelectedId(t.agentId);
+  };
+
+  const onCloseTab = (id: string) => {
+    const idx = tabs.findIndex((t) => t.id === id);
+    if (idx === -1) return;
+    const next = tabs.filter((t) => t.id !== id);
+    setTabs(next);
+    if (activeTabId === id) {
+      const newActive = next[idx] ?? next[idx - 1] ?? null;
+      setActiveTabId(newActive?.id ?? null);
+      if (newActive?.kind === "agent") setSelectedId(newActive.agentId);
+    }
+  };
+
+  // Close the active tab on Cmd/Ctrl+W. The browser reserves Cmd+W to close
+  // its own tab, so preventDefault may or may not work depending on how the
+  // page is hosted (webview wrappers often let it through). We also bind
+  // Cmd/Ctrl+Shift+W as a guaranteed-available alternative.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      if (e.key.toLowerCase() !== "w") return;
+      if (!activeTabId) return;
+      e.preventDefault();
+      onCloseTab(activeTabId);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeTabId, tabs]);
+
+  const agentSettingsEntry = useMemo(() => {
+    if (!agentSettingsId) return null;
+    return agents.find((a) => a.agent.id === agentSettingsId) ?? null;
+  }, [agentSettingsId, agents]);
+
   return (
     <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
-      <StatusHeader
-        agent={selected?.agent ?? null}
-        runtime={selected?.runtime ?? null}
-        connected={connected}
-        agentCount={agents.length}
-      />
       <div className="grid flex-1 grid-cols-12 overflow-hidden">
         <div className="col-span-2 overflow-hidden">
           <AgentSidebar
             agents={agents}
             selectedId={selectedId}
-            onSelect={setSelectedId}
+            connected={connected}
+            metaOpen={metaOpen}
+            onSelect={onSidebarSelect}
+            onOpenInNewTab={onSidebarOpenInNewTab}
             onNew={() => setShowNew(true)}
+            onToggleMeta={() => setMetaOpen((v) => !v)}
+            onOpenSettings={() => setShowGlobalSettings(true)}
+            onOpenAgentSettings={(id) => setAgentSettingsId(id)}
           />
         </div>
         <div
           className={
             metaOpen
-              ? "col-span-4 overflow-hidden border-r border-zinc-800"
-              : "col-span-6 overflow-hidden border-r border-zinc-800"
+              ? "col-span-4 flex flex-col overflow-hidden border-r border-zinc-800"
+              : "col-span-6 flex flex-col overflow-hidden border-r border-zinc-800"
           }
         >
-          <Transcript
-            events={selectedEvents}
-            agent={selected?.agent ?? null}
-            running={selected?.runtime.alive ?? false}
-            uptimeSec={selected?.runtime.uptimeSec ?? null}
-            sessionPath={selected?.runtime.sessionPath ?? null}
+          <TabBar
+            tabs={tabsForBar}
+            activeId={activeTabId}
+            onActivate={onActivateTab}
+            onClose={onCloseTab}
           />
+          <div className="min-h-0 flex-1">
+            {activeTab?.kind === "agent" ? (
+              <Transcript
+                events={activeAgentEvents}
+                agent={activeAgentEntry?.agent ?? null}
+                runtime={activeAgentEntry?.runtime ?? null}
+                onOpenSettings={() =>
+                  activeTab.kind === "agent" &&
+                  setAgentSettingsId(activeTab.agentId)
+                }
+              />
+            ) : activeTab?.kind === "file" ? (
+              <FileViewer
+                workingDir={activeTab.workingDir}
+                hash={activeTab.hash}
+                filePath={activeTab.filePath}
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center text-sm italic text-zinc-600">
+                no tab open — select an agent on the left
+              </div>
+            )}
+          </div>
         </div>
         {metaOpen && (
           <div className="col-span-3 overflow-hidden border-r border-zinc-800">
@@ -206,33 +425,36 @@ export default function Home() {
           </div>
           <div className="overflow-hidden">
             <FileActivity
-              liveChanges={liveChangesForAgent}
+              liveChanges={liveChangesForSidebar}
               workingDir={selected?.agent.workingDir ?? null}
+              lastCommit={
+                selected?.agent.workingDir
+                  ? (commitByDir[selected.agent.workingDir] ?? null)
+                  : null
+              }
+              onOpenFile={onOpenFile}
             />
           </div>
         </div>
       </div>
-      {!metaOpen && (
-        <button
-          onClick={() => setMetaOpen(true)}
-          className="fixed bottom-4 right-4 z-40 flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 shadow-lg hover:bg-zinc-800"
-          title="Open meta-agent (⌘K)"
-        >
-          <span className="size-2 rounded-full bg-emerald-500" />
-          ask meta-agent
-          <span className="ml-1 rounded border border-zinc-700 px-1 text-[10px] text-zinc-500">
-            ⌘K
-          </span>
-        </button>
-      )}
       {showNew && (
         <NewAgentDialog
           onClose={() => setShowNew(false)}
           onCreated={(a) => {
             setShowNew(false);
-            setSelectedId(a.id);
+            onSidebarSelect(a.id);
           }}
         />
+      )}
+      {agentSettingsId && (
+        <AgentSettingsModal
+          agent={agentSettingsEntry?.agent ?? null}
+          runtime={agentSettingsEntry?.runtime ?? null}
+          onClose={() => setAgentSettingsId(null)}
+        />
+      )}
+      {showGlobalSettings && (
+        <SettingsPage onClose={() => setShowGlobalSettings(false)} />
       )}
     </div>
   );
