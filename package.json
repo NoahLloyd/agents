@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "concurrently -k -n web,ws -c blue,magenta \"next dev -p 4000\" \"bun --watch ws-server.ts\"",
+    "dev": "bun scripts/dev.ts",
     "dev:web": "next dev -p 4000",
     "dev:ws": "bun --watch ws-server.ts",
     "build": "next build",

@@ -2,15 +2,19 @@
 
 import type { Agent } from "./types";
 
+// Port the dev launcher assigned to ws-server.ts; falls back to 4001 for
+// `start` / direct `dev:web` invocations that didn't go through scripts/dev.ts.
+const WS_PORT = process.env.NEXT_PUBLIC_WS_PORT ?? "4001";
+
 export const WS_HTTP =
   typeof window !== "undefined"
-    ? `http://${window.location.hostname}:4001`
-    : "http://localhost:4001";
+    ? `http://${window.location.hostname}:${WS_PORT}`
+    : `http://localhost:${WS_PORT}`;
 
 export const WS_URL =
   typeof window !== "undefined"
-    ? `ws://${window.location.hostname}:4001`
-    : "ws://localhost:4001";
+    ? `ws://${window.location.hostname}:${WS_PORT}`
+    : `ws://localhost:${WS_PORT}`;
 
 async function jfetch<T>(input: string, init?: RequestInit): Promise<T> {
   const r = await fetch(input, {
