@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import FileInput from "@/components/FileInput";
 import type { Agent, AgentRuntime } from "@/lib/types";
 import { api } from "@/lib/api";
 
@@ -343,13 +344,10 @@ function DirectionField({ agent }: { agent: Agent }) {
           }`}
         />
       ) : (
-        <input
+        <FileInput
           value={filePath}
-          onChange={(e) => setFilePath(e.target.value)}
+          onChange={setFilePath}
           onBlur={() => void commit()}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-          }}
           className={`w-full rounded border bg-zinc-900 px-2 py-1.5 font-mono text-xs outline-none ${
             dirty ? "border-amber-700 text-amber-100" : "border-zinc-700 text-zinc-100 focus:border-zinc-500"
           }`}

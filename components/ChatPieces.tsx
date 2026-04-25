@@ -151,7 +151,7 @@ export function ThinkingRow({ text, ts }: { text: string; ts?: number }) {
               {fmtClockFull(ts)}
             </div>
           )}
-          <div className="whitespace-pre-wrap text-zinc-400">{text}</div>
+          <div className="whitespace-pre-wrap text-zinc-300">{text}</div>
         </div>
       )}
     </div>
@@ -194,7 +194,7 @@ export function ToolRow({
   const Icon = display.icon;
 
   return (
-    <div className="text-[11px] font-mono text-zinc-500">
+    <div className="text-[11px] text-zinc-300">
       <button
         onClick={() => setOpen((v) => !v)}
         title={display.displayName}
@@ -218,7 +218,7 @@ export function ToolRow({
           </span>
         )}
         {display.summary && (
-          <span className="truncate opacity-70">{display.summary}</span>
+          <span className="truncate opacity-90">{display.summary}</span>
         )}
         {isError && (
           <span className="ml-auto shrink-0 text-red-400">error</span>
@@ -232,7 +232,7 @@ export function ToolRow({
       {open && (
         <div className="mt-1 ml-4 space-y-1">
           {ts !== undefined && (
-            <div className="font-mono text-[10px] text-zinc-600">
+            <div className="font-mono text-[10px] text-zinc-500">
               {fmtClockFull(ts)}
             </div>
           )}
@@ -243,14 +243,14 @@ export function ToolRow({
           )}
           {result && (
             <div>
-              <div className="mb-0.5 text-[10px] uppercase tracking-wider text-zinc-600">
+              <div className="mb-0.5 text-[10px] uppercase tracking-wider text-zinc-500">
                 result{isError ? " (error)" : ""}
               </div>
               <pre
                 className={`max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border px-2 py-1.5 text-[11px] ${
                   isError
                     ? "border-red-900 text-red-300"
-                    : "border-zinc-800 text-zinc-400"
+                    : "border-zinc-800 text-zinc-300"
                 }`}
               >
                 {result.content}
@@ -271,9 +271,9 @@ export function ToolRow({
 export function LiveDots() {
   return (
     <span className="inline-flex gap-0.5" aria-hidden>
-      <span className="inline-block h-1 w-1 animate-bounce rounded-full bg-zinc-500 [animation-delay:-0.3s]" />
-      <span className="inline-block h-1 w-1 animate-bounce rounded-full bg-zinc-500 [animation-delay:-0.15s]" />
-      <span className="inline-block h-1 w-1 animate-bounce rounded-full bg-zinc-500" />
+      <span className="inline-block h-1 w-1 animate-bounce rounded-full bg-zinc-400 [animation-delay:-0.3s]" />
+      <span className="inline-block h-1 w-1 animate-bounce rounded-full bg-zinc-400 [animation-delay:-0.15s]" />
+      <span className="inline-block h-1 w-1 animate-bounce rounded-full bg-zinc-400" />
     </span>
   );
 }

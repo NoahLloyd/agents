@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Transcript from "@/components/Transcript";
 import FileActivity from "@/components/FileActivity";
 import PinnedNotes from "@/components/PinnedNotes";
@@ -354,10 +354,130 @@ export default function Home() {
     return agents.find((a) => a.agent.id === agentSettingsId) ?? null;
   }, [agentSettingsId, agents]);
 
+  // Panel widths as percentages. Sidebar + main + [meta] + right must sum to 100.
+  const [sidebarPct, setSidebarPct] = useState(16);
+  const [mainPct, setMainPct] = useState(50);
+  const [metaPct, setMetaPct] = useState(25);
+  const [rightPct, setRightPct] = useState(34);
+  // Right panel vertical split: notes height as percentage of right panel height.
+  const [notesPct, setNotesPct] = useState(60);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const rightPanelRef = useRef<HTMLDivElement>(null);
+
+  // When meta opens/closes, redistribute space between main and meta.
+  const prevMetaOpenRef = useRef(metaOpen);
+  useEffect(() => {
+    if (metaOpen === prevMetaOpenRef.current) return;
+    prevMetaOpenRef.current = metaOpen;
+    if (metaOpen) {
+      // Take metaPct from main
+      const take = Math.min(metaPct, mainPct - 15);
+      setMainPct((p) => p - take);
+    } else {
+      // Give meta's space back to main
+      setMainPct((p) => p + metaPct);
+    }
+  }, [metaOpen]);
+
+  const makeDragH = useCallback(
+    (onDelta: (dpct: number) => void) =>
+      (e: React.MouseEvent) => {
+        e.preventDefault();
+        let last = e.clientX;
+        const onMove = (ev: MouseEvent) => {
+          const total = containerRef.current?.offsetWidth ?? window.innerWidth;
+          const dpct = ((ev.clientX - last) / total) * 100;
+          last = ev.clientX;
+          onDelta(dpct);
+        };
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          document.body.style.cursor = '';
+          document.body.style.userSelect = '';
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+      },
+    [],
+  );
+
+  const makeDragV = useCallback(
+    (onDelta: (dpct: number) => void) =>
+      (e: React.MouseEvent) => {
+        e.preventDefault();
+        let last = e.clientY;
+        const onMove = (ev: MouseEvent) => {
+          const total = rightPanelRef.current?.offsetHeight ?? window.innerHeight;
+          const dpct = ((ev.clientY - last) / total) * 100;
+          last = ev.clientY;
+          onDelta(dpct);
+        };
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          document.body.style.cursor = '';
+          document.body.style.userSelect = '';
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        document.body.style.cursor = 'row-resize';
+        document.body.style.userSelect = 'none';
+      },
+    [],
+  );
+
+  const onDragSidebarMain = useMemo(
+    () =>
+      makeDragH((d) => {
+        setSidebarPct((p) => Math.max(8, Math.min(30, p + d)));
+        setMainPct((p) => Math.max(15, p - d));
+      }),
+    [makeDragH],
+  );
+
+  const onDragMainMeta = useMemo(
+    () =>
+      makeDragH((d) => {
+        setMainPct((p) => Math.max(15, p + d));
+        setMetaPct((p) => Math.max(15, p - d));
+      }),
+    [makeDragH],
+  );
+
+  const onDragMetaRight = useMemo(
+    () =>
+      makeDragH((d) => {
+        setMetaPct((p) => Math.max(15, p + d));
+        setRightPct((p) => Math.max(15, p - d));
+      }),
+    [makeDragH],
+  );
+
+  const onDragMainRight = useMemo(
+    () =>
+      makeDragH((d) => {
+        setMainPct((p) => Math.max(15, p + d));
+        setRightPct((p) => Math.max(15, p - d));
+      }),
+    [makeDragH],
+  );
+
+  const onDragNotesActivity = useMemo(
+    () =>
+      makeDragV((d) => {
+        setNotesPct((p) => Math.max(15, Math.min(85, p + d)));
+      }),
+    [makeDragV],
+  );
+
   return (
     <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
-      <div className="grid flex-1 grid-cols-12 overflow-hidden">
-        <div className="col-span-2 overflow-hidden">
+      <div ref={containerRef} className="flex flex-1 overflow-hidden">
+        {/* Sidebar */}
+        <div style={{ width: sidebarPct + '%' }} className="shrink-0 overflow-hidden">
           <AgentSidebar
             agents={agents}
             selectedId={selectedId}
@@ -371,13 +491,15 @@ export default function Home() {
             onOpenAgentSettings={(id) => setAgentSettingsId(id)}
           />
         </div>
+
+        {/* Drag: sidebar | main */}
         <div
-          className={
-            metaOpen
-              ? "col-span-4 flex flex-col overflow-hidden border-r border-zinc-800"
-              : "col-span-6 flex flex-col overflow-hidden border-r border-zinc-800"
-          }
-        >
+          onMouseDown={onDragSidebarMain}
+          className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors"
+        />
+
+        {/* Main transcript / file viewer */}
+        <div style={{ width: mainPct + '%' }} className="flex shrink-0 flex-col overflow-hidden">
           <TabBar
             tabs={tabsForBar}
             activeId={activeTabId}
@@ -385,17 +507,17 @@ export default function Home() {
             onClose={onCloseTab}
           />
           <div className="min-h-0 flex-1">
-            {activeTab?.kind === "agent" ? (
+            {activeTab?.kind === 'agent' ? (
               <Transcript
                 events={activeAgentEvents}
                 agent={activeAgentEntry?.agent ?? null}
                 runtime={activeAgentEntry?.runtime ?? null}
                 onOpenSettings={() =>
-                  activeTab.kind === "agent" &&
+                  activeTab.kind === 'agent' &&
                   setAgentSettingsId(activeTab.agentId)
                 }
               />
-            ) : activeTab?.kind === "file" ? (
+            ) : activeTab?.kind === 'file' ? (
               <FileViewer
                 workingDir={activeTab.workingDir}
                 hash={activeTab.hash}
@@ -408,22 +530,42 @@ export default function Home() {
             )}
           </div>
         </div>
+
+        {/* Meta agent panel */}
         {metaOpen && (
-          <div className="col-span-3 overflow-hidden border-r border-zinc-800">
-            <MetaAgentChat onClose={() => setMetaOpen(false)} />
-          </div>
+          <>
+            <div
+              onMouseDown={onDragMainMeta}
+              className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors"
+            />
+            <div style={{ width: metaPct + '%' }} className="shrink-0 overflow-hidden">
+              <MetaAgentChat onClose={() => setMetaOpen(false)} />
+            </div>
+            <div
+              onMouseDown={onDragMetaRight}
+              className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors"
+            />
+          </>
         )}
-        <div
-          className={
-            metaOpen
-              ? "col-span-3 grid grid-rows-[1fr_minmax(180px,40%)] overflow-hidden"
-              : "col-span-4 grid grid-rows-[1fr_minmax(180px,40%)] overflow-hidden"
-          }
-        >
-          <div className="overflow-hidden border-b border-zinc-800">
+
+        {/* Drag: main | right (only when meta is closed) */}
+        {!metaOpen && (
+          <div
+            onMouseDown={onDragMainRight}
+            className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors"
+          />
+        )}
+
+        {/* Right panel: pinned notes + file activity */}
+        <div ref={rightPanelRef} className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <div style={{ height: notesPct + '%' }} className="overflow-hidden">
             <PinnedNotes />
           </div>
-          <div className="overflow-hidden">
+          <div
+            onMouseDown={onDragNotesActivity}
+            className="h-1 shrink-0 cursor-row-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors"
+          />
+          <div className="min-h-0 flex-1 overflow-hidden">
             <FileActivity
               liveChanges={liveChangesForSidebar}
               workingDir={selected?.agent.workingDir ?? null}

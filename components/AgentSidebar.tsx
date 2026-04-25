@@ -126,7 +126,7 @@ function AgentRow({
   const [busy, setBusy] = useState(false);
 
   const dot = runtime.alive
-    ? "bg-emerald-400"
+    ? agent.keepAlive ? "bg-emerald-400" : "bg-sky-400"
     : runtime.scheduledRestartAt
       ? "bg-amber-400 animate-pulse"
       : agent.enabled
@@ -195,14 +195,7 @@ function AgentRow({
         <span>{agent.direction.kind === "file" ? "file" : "inline"}</span>
         <span>·</span>
         <span>{fmtUptime(runtime.uptimeSec)}</span>
-        {agent.keepAlive && (
-          <>
-            <span>·</span>
-            <span className="text-emerald-500/80" title="keep-alive on">
-              ♥
-            </span>
-          </>
-        )}
+
         {countdown && (
           <>
             <span>·</span>

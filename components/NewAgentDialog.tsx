@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import FileInput from "@/components/FileInput";
 import type { Agent } from "@/lib/types";
 import { api } from "@/lib/api";
 
@@ -84,11 +85,7 @@ export default function NewAgentDialog({
           </Field>
 
           <Field label="working dir">
-            <input
-              value={workingDir}
-              onChange={(e) => setWorkingDir(e.target.value)}
-              className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs text-zinc-100 outline-none focus:border-zinc-500"
-            />
+            <DirInput value={workingDir} onChange={setWorkingDir} />
           </Field>
 
           <Field label="direction">
@@ -115,9 +112,9 @@ export default function NewAgentDialog({
                 className="w-full resize-y rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs text-zinc-100 outline-none focus:border-zinc-500"
               />
             ) : (
-              <input
+              <FileInput
                 value={filePath}
-                onChange={(e) => setFilePath(e.target.value)}
+                onChange={setFilePath}
                 className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs text-zinc-100 outline-none focus:border-zinc-500"
               />
             )}
@@ -195,6 +192,92 @@ export default function NewAgentDialog({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function DirInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [open, setOpen] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(-1);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const fetchSuggestions = (q: string) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/dirs?q=${encodeURIComponent(q)}`);
+        const data = await res.json() as { dirs: string[] };
+        setSuggestions(data.dirs);
+        setOpen(data.dirs.length > 0);
+        setActiveIdx(-1);
+      } catch {}
+    }, 120);
+  };
+
+  const pick = (dir: string) => {
+    onChange(dir);
+    setSuggestions([]);
+    setOpen(false);
+  };
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, []);
+
+  return (
+    <div ref={containerRef} className="relative">
+      <input
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value);
+          fetchSuggestions(e.target.value);
+        }}
+        onKeyDown={(e) => {
+          if (!open) return;
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setActiveIdx((i) => Math.min(i + 1, suggestions.length - 1));
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setActiveIdx((i) => Math.max(i - 1, -1));
+          } else if (e.key === "Enter" && activeIdx >= 0) {
+            e.preventDefault();
+            pick(suggestions[activeIdx]);
+          } else if (e.key === "Escape") {
+            setOpen(false);
+          } else if (e.key === "Tab" && suggestions.length > 0) {
+            e.preventDefault();
+            pick(suggestions[activeIdx >= 0 ? activeIdx : 0]);
+          }
+        }}
+        onFocus={() => { if (suggestions.length > 0) setOpen(true); }}
+        className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs text-zinc-100 outline-none focus:border-zinc-500"
+      />
+      {open && suggestions.length > 0 && (
+        <ul className="absolute z-50 mt-1 w-full overflow-hidden rounded border border-zinc-700 bg-zinc-900 shadow-xl">
+          {suggestions.map((dir, i) => (
+            <li
+              key={dir}
+              onMouseDown={(e) => { e.preventDefault(); pick(dir); }}
+              className={`cursor-pointer px-2 py-1.5 font-mono text-xs truncate ${
+                i === activeIdx
+                  ? "bg-emerald-800/50 text-zinc-100"
+                  : "text-zinc-300 hover:bg-zinc-800"
+              }`}
+            >
+              {dir}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

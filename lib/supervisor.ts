@@ -50,6 +50,9 @@ type LiveAgent = {
   // If set, prepended to the next spawn's prompt. Cleared after use. Used by
   // the stagnation kill path to nudge the model back into substantive work.
   pendingExtraContext: string | null;
+  // Tool calls since the agent last read its own direction file. Resets on
+  // each direction-file Read; triggers a re-anchor nudge at FILE_ANCHOR_TOOL_CALLS.
+  toolCallsSinceFileRead: number;
 };
 
 // An agent that's alive but has produced no transcript activity for this
@@ -59,6 +62,11 @@ const STUCK_THRESHOLD_MS = 5 * 60 * 1000;
 // Previously 30s — long enough that clean exits felt like they never came
 // back.
 const RESTART_BACKOFF_MS = 5_000;
+const MAX_RATE_LIMIT_WAIT_MS = 5 * 60 * 1000;
+// File-anchor nudge: if a file-driven agent hasn't re-read its direction file
+// in this many tool calls, kill + restart with a reminder to re-anchor.
+const FILE_ANCHOR_TOOL_CALLS = 50;
+const FILE_ANCHOR_CONTEXT = `You have been working for ${FILE_ANCHOR_TOOL_CALLS}+ tool calls without re-reading your direction file. Re-read it now as your first action, then re-anchor your work to its priorities before continuing. If you have drifted from what the file asks, correct course.`;
 // Stagnation window: if the agent has made many tool calls in this window
 // but none of them were progress tools (Edit/Write/MultiEdit), we treat it
 // as stuck-in-loop (e.g. atlas was spinning `echo "ok"` for 5h after running
@@ -180,10 +188,15 @@ export function setBroadcaster(fn: Broadcast): void {
 
 const NEVER_EXIT_CODA = `Begin. This session must never end voluntarily. Do not ask questions, do not declare yourself done, do not exit. If you believe the immediate task is complete, find related work: deepen, refactor, cross-link, stress-test, or explore adjacent questions. Always have a next tool call queued.`;
 
+const SESSION_MARKER_PREFIX = "supervisor-agent-id:";
+
 export function buildPrompt(agent: Agent, extraContext?: string | null): string {
   const tail = extraContext ? `\n\n${extraContext}` : "";
+  // Embed a marker so attributeNewestSession can tie the session file to this
+  // specific agent, even when siblings start at the same time.
+  const marker = `\n<!-- ${SESSION_MARKER_PREFIX}${agent.id} -->`;
   if (agent.direction.kind === "inline") {
-    return `${agent.direction.prompt}\n\n${NEVER_EXIT_CODA}${tail}`;
+    return `${agent.direction.prompt}\n\n${NEVER_EXIT_CODA}${tail}${marker}`;
   }
   // file-mode: re-read on every spawn so edits to the file take effect next turn.
   const fp = agent.direction.filePath;
@@ -191,7 +204,7 @@ export function buildPrompt(agent: Agent, extraContext?: string | null): string 
     return `Your steering file ${fp} does not exist yet. Create it and begin work.\n\n${NEVER_EXIT_CODA}${tail}`;
   }
   const body = readFileSync(fp, "utf8");
-  return `Your steering file is ${fp}. Re-read it often. Current contents follow:\n\n---\n${body}\n---\n\n${NEVER_EXIT_CODA}${tail}`;
+  return `Your steering file is ${fp}. Re-read it often. Current contents follow:\n\n---\n${body}\n---\n\n${NEVER_EXIT_CODA}${tail}${marker}`;
 }
 
 function spawnAgent(la: LiveAgent): void {
@@ -386,14 +399,21 @@ function handleAgentExit(
   console.log(
     `[sup] agent ${la.agent.name} pid=${exitedPid} exited (code=${code ?? "?"} signal=${signal ?? "?"})`,
   );
+  // Immediately clear the session path and notify the frontend to wipe the
+  // transcript view. This gives a clean slate before the new session starts.
+  if (la.agent.enabled && la.agent.keepAlive && la.runtime.sessionPath) {
+    la.runtime.sessionPath = null;
+    broadcastFn({ type: "session_reset", agentId: la.agent.id });
+  }
   if (la.agent.enabled && la.agent.keepAlive) {
     const limitUntil = detectRateLimit(
       la.runtime.stderrLogPath,
       la.runtime.stdoutLogPath,
     );
     if (limitUntil && limitUntil > Date.now()) {
-      la.runtime.rateLimitedUntil = limitUntil;
-      scheduleRestart(la, limitUntil + 5_000);
+      const cappedUntil = Math.min(limitUntil, Date.now() + MAX_RATE_LIMIT_WAIT_MS);
+      la.runtime.rateLimitedUntil = cappedUntil;
+      scheduleRestart(la, cappedUntil + 5_000);
     } else {
       // Crash, voluntary exit, "I'm done" — all get the same fast restart.
       // Small backoff prevents tight crash loops.
@@ -478,6 +498,30 @@ function pollStagnantAgents(): void {
   for (const la of live.values()) {
     if (!la.runtime.alive || la.runtime.pid === null) continue;
     if (!la.agent.enabled || !la.agent.keepAlive) continue;
+
+    // File-anchor nudge: file-driven agents that haven't re-read their
+    // direction file in FILE_ANCHOR_TOOL_CALLS tool calls get restarted
+    // with a prompt to re-anchor. Skip if stagnation already firing.
+    if (
+      la.agent.direction.kind === "file" &&
+      la.toolCallsSinceFileRead >= FILE_ANCHOR_TOOL_CALLS &&
+      !la.pendingExtraContext
+    ) {
+      console.warn(
+        `[sup] agent ${la.agent.name} pid=${la.runtime.pid} file-anchor: ${la.toolCallsSinceFileRead} tool calls since last direction-file read — restarting with re-anchor nudge`,
+      );
+      la.pendingExtraContext = FILE_ANCHOR_CONTEXT;
+      la.toolCallsSinceFileRead = 0;
+      try {
+        process.kill(-la.runtime.pid, "SIGTERM");
+      } catch {
+        try {
+          process.kill(la.runtime.pid, "SIGTERM");
+        } catch {}
+      }
+      continue;
+    }
+
     const stagnantCount = isStagnant(
       la.recentToolCalls,
       now,
@@ -489,6 +533,7 @@ function pollStagnantAgents(): void {
     );
     la.pendingExtraContext = STAGNATION_RESTART_CONTEXT;
     la.recentToolCalls = [];
+    la.toolCallsSinceFileRead = 0;
     try {
       process.kill(-la.runtime.pid, "SIGTERM");
     } catch {
@@ -515,44 +560,64 @@ function scheduleRestart(la: LiveAgent, atMs: number): void {
   broadcastAgent(la);
 }
 
+function readSessionMarker(filePath: string): string | null {
+  try {
+    const slice = readFileSync(filePath, "utf8").slice(0, 4096);
+    const m = slice.match(new RegExp(SESSION_MARKER_PREFIX + "([\w-]+)"));
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 async function attributeNewestSession(la: LiveAgent): Promise<void> {
-  // Only running agents should claim session files. Stopped or
-  // never-started agents share the same sessions directory as their
-  // siblings, so without this guard the dir watcher would latch them
-  // onto whichever unclaimed JSONL looks newest — including old files
-  // from another agent's previous run, producing the "stopped agent shows
-  // someone else's work" bug.
   if (!la.runtime.alive) return;
   if (!la.spawnedAt) return;
+  // Once a session is attributed and the file still exists, there's nothing
+  // to find — claude keeps writing to the same session for the life of the
+  // process. Without this guard the dir watcher rescans every JSONL on every
+  // append, which pegs CPU once the projects/ dir accumulates ~hundreds of
+  // historical session files.
+  if (la.runtime.sessionPath && existsSync(la.runtime.sessionPath)) return;
   const dir = sessionsDirFor(la.agent.workingDir);
   if (!existsSync(dir)) return;
   const entries = readdirSync(dir).filter((e) => e.endsWith(".jsonl"));
   const spawnedAt = la.spawnedAt;
-  // Pick the file whose creation time is closest to our spawn moment,
-  // within a tight window. Using mtime here is wrong: a sibling's still-
-  // active session file has a fresh mtime even though it's ancient.
-  let best: { path: string; diff: number } | null = null;
+
+  let markerMatch: string | null = null;
+  let timeBest: { path: string; diff: number } | null = null;
+
   for (const f of entries) {
     const full = path.join(dir, f);
     try {
       const s = statSync(full);
-      if (sessionAlreadyAttributed(full, la.agent.id)) continue;
       if (la.usedSessionPaths.has(full)) continue;
+      // If another agent already claimed this file, skip — unless we can
+      // prove via marker that it's actually ours.
+      const marker = readSessionMarker(full);
+      if (marker && marker !== la.agent.id) continue; // belongs to a sibling
+      if (!marker && sessionAlreadyAttributed(full, la.agent.id)) continue;
+      if (marker === la.agent.id) {
+        // Definitive match — prefer over time-based candidates.
+        markerMatch = full;
+        break;
+      }
+      // Fallback: time-proximity for sessions without a marker yet.
       const born = s.birthtimeMs || s.ctimeMs;
       const diff = born - spawnedAt;
       if (diff < -5_000 || diff > 30_000) continue;
-      if (!best || Math.abs(diff) < Math.abs(best.diff)) {
-        best = { path: full, diff };
+      if (!timeBest || Math.abs(diff) < Math.abs(timeBest.diff)) {
+        timeBest = { path: full, diff };
       }
     } catch {}
   }
-  if (best && best.path !== la.runtime.sessionPath) {
+
+  const chosen = markerMatch ?? timeBest?.path ?? null;
+  if (chosen && chosen !== la.runtime.sessionPath) {
     const isSwitch = la.runtime.sessionPath !== null;
-    la.runtime.sessionPath = best.path;
+    la.runtime.sessionPath = chosen;
     la.sessionOffset = 0;
     la.lastActivityAt = Date.now();
-    // Tell the frontend to drop any cached events from the previous session
-    // before we start streaming the new one.
     if (isSwitch) {
       broadcastFn({ type: "session_reset", agentId: la.agent.id });
     }
@@ -641,6 +706,17 @@ async function tailFromOffset(la: LiveAgent): Promise<void> {
         // window anyway.
         if (la.recentToolCalls.length > 200) {
           la.recentToolCalls.splice(0, la.recentToolCalls.length - 200);
+        }
+        // Track direction-file reads for the file-anchor nudge.
+        if (
+          la.agent.direction.kind === "file" &&
+          ev.name === "Read" &&
+          typeof (ev as unknown as Record<string, unknown> & { input: Record<string, unknown> }).input["file_path"] === "string" &&
+          (ev as unknown as Record<string, unknown> & { input: Record<string, unknown> }).input["file_path"] === la.agent.direction.filePath
+        ) {
+          la.toolCallsSinceFileRead = 0;
+        } else {
+          la.toolCallsSinceFileRead++;
         }
       }
       broadcastFn({ type: "transcript", agentId: la.agent.id, event: ev });
@@ -736,6 +812,7 @@ export function createAgent(agent: Agent): LiveAgent {
     usedSessionPaths: new Set(),
     recentToolCalls: [],
     pendingExtraContext: null,
+    toolCallsSinceFileRead: 0,
   };
   live.set(agent.id, la);
   persistAgent(agent);
@@ -805,6 +882,7 @@ export function init(): void {
       usedSessionPaths: new Set(),
       recentToolCalls: [],
       pendingExtraContext: null,
+      toolCallsSinceFileRead: 0,
     };
     // Reattach to existing live process if PID file exists.
     const existingPid = readPidFile(a.id);

@@ -184,7 +184,9 @@ export default function MetaAgentChat({ onClose }: Props) {
 
   const sendMessage = useCallback(
     async (text: string) => {
-      if (!text.trim() || streaming) return;
+      if (!text.trim()) return;
+      // Abort any in-flight request before sending a new message.
+      if (abortRef.current) abortRef.current.abort();
       setError(null);
       stuckRef.current = true;
       setStuckUI(true);
@@ -252,7 +254,7 @@ export default function MetaAgentChat({ onClose }: Props) {
         abortRef.current = null;
       }
     },
-    [sessionId, streaming, patchAssistant],
+    [sessionId, patchAssistant],
   );
 
   const onSubmit = useCallback(
@@ -344,14 +346,14 @@ export default function MetaAgentChat({ onClose }: Props) {
       {!stuckUI && (
         <button
           onClick={jumpToLive}
-          className="absolute bottom-28 right-4 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-200 shadow-lg hover:bg-zinc-800"
+          className="absolute bottom-14 right-4 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-200 shadow-lg hover:bg-zinc-800"
         >
           ↓ jump to live
         </button>
       )}
 
-      <form onSubmit={onSubmit} className="shrink-0 border-t border-zinc-800 p-2">
-        <div className="relative rounded-lg border border-zinc-800 bg-zinc-900 transition focus-within:border-emerald-800/60">
+      <form onSubmit={onSubmit} className="shrink-0 border-t border-zinc-800">
+        <div className="relative bg-zinc-900 transition focus-within:bg-zinc-900">
           <textarea
             ref={inputRef}
             value={input}
@@ -369,28 +371,8 @@ export default function MetaAgentChat({ onClose }: Props) {
             }
             rows={2}
             className="w-full resize-none bg-transparent px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-600"
-            disabled={streaming}
           />
-          <div className="flex items-center justify-between border-t border-zinc-800 px-2 py-1 text-[10px] text-zinc-600">
-            <span>Enter to send · Shift+Enter for newline</span>
-            {streaming ? (
-              <button
-                type="button"
-                onClick={cancel}
-                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800"
-              >
-                stop
-              </button>
-            ) : (
-              <button
-                type="submit"
-                disabled={!input.trim()}
-                className="rounded bg-emerald-700 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-600 disabled:opacity-40 disabled:hover:bg-emerald-700"
-              >
-                send →
-              </button>
-            )}
-          </div>
+
         </div>
       </form>
     </div>
