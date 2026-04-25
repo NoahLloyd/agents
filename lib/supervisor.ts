@@ -43,6 +43,13 @@ type LiveAgent = {
   // seconds — skipping it prevents us from re-tailing it and replaying
   // every old event as if it were fresh.
   usedSessionPaths: Set<string>;
+  // Sliding window of recent tool calls, used for stagnation detection (the
+  // "agent ran out of real work and is now spinning on heartbeat-style
+  // commands" failure mode). Capped/trimmed in tailFromOffset.
+  recentToolCalls: { name: string; ts: number }[];
+  // If set, prepended to the next spawn's prompt. Cleared after use. Used by
+  // the stagnation kill path to nudge the model back into substantive work.
+  pendingExtraContext: string | null;
 };
 
 // An agent that's alive but has produced no transcript activity for this
@@ -52,6 +59,14 @@ const STUCK_THRESHOLD_MS = 5 * 60 * 1000;
 // Previously 30s — long enough that clean exits felt like they never came
 // back.
 const RESTART_BACKOFF_MS = 5_000;
+// Stagnation window: if the agent has made many tool calls in this window
+// but none of them were progress tools (Edit/Write/MultiEdit), we treat it
+// as stuck-in-loop (e.g. atlas was spinning `echo "ok"` for 5h after running
+// out of useful work). Kill + restart with extra context.
+const STAGNATION_WINDOW_MS = 15 * 60 * 1000;
+const STAGNATION_MIN_EVENTS = 10;
+const PROGRESS_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+const STAGNATION_RESTART_CONTEXT = `You were just restarted because for the previous ~15 minutes you were making tool calls but none of them edited any file or otherwise moved the work forward. That usually means you ran out of obvious next steps and started filling time. There is always more substantive work here — even if you are not sure what. Re-read your steering file. Re-read the notes you most recently touched. Find the weakest claim, the thinnest argument, the question you have been avoiding. Sit with it. Think hard. Refine. Do not reach for trivial filler tool calls when you are unsure — pick a specific hard question and dig into it.`;
 
 const live: Map<string, LiveAgent> = new Map();
 let broadcastFn: Broadcast = () => {};
@@ -185,7 +200,11 @@ function spawnAgent(la: LiveAgent): void {
   }
   const stdoutFd = openSync(la.runtime.stdoutLogPath, "a");
   const stderrFd = openSync(la.runtime.stderrLogPath, "a");
-  const prompt = buildPrompt(agent);
+  let prompt = buildPrompt(agent);
+  if (la.pendingExtraContext) {
+    prompt = `${prompt}\n\n${la.pendingExtraContext}`;
+    la.pendingExtraContext = null;
+  }
 
   const args = [
     "--dangerously-skip-permissions",
@@ -248,6 +267,7 @@ function spawnAgent(la: LiveAgent): void {
   la.runtime.scheduledRestartAt = null;
   la.spawnedAt = Date.now();
   la.sessionOffset = 0;
+  la.recentToolCalls = [];
   writePidFile(agent.id, child.pid);
   console.log(`[sup] spawned agent ${agent.name} pid=${child.pid}`);
   broadcastAgent(la);
@@ -258,10 +278,59 @@ function spawnAgent(la: LiveAgent): void {
   }, 3000);
 }
 
-function detectRateLimitFromStderr(stderrPath: string): number | null {
+/**
+ * Find the next wall-clock instant in `tz` that matches the given hour and
+ * minute. Returns ms-since-epoch, or null if the timezone is unrecognized.
+ *
+ * Implementation: walk forward in 1-minute steps (capped at 30h) and check
+ * each instant's tz wall-clock components via Intl. Avoids hand-rolled
+ * offset math, which is brittle around DST transitions.
+ */
+function nextOccurrenceInTz(
+  hour24: number,
+  minute: number,
+  tz: string,
+): number | null {
   try {
-    if (!existsSync(stderrPath)) return null;
-    const content = readFileSync(stderrPath, "utf8");
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    const now = Date.now();
+    for (let m = 1; m < 30 * 60; m++) {
+      const ts = now + m * 60 * 1000;
+      const parts: Record<string, string> = {};
+      for (const p of fmt.formatToParts(new Date(ts))) parts[p.type] = p.value;
+      const hh = parseInt(parts.hour, 10) % 24;
+      const mm = parseInt(parts.minute, 10);
+      if (hh === hour24 && mm === minute) return ts;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function detectRateLimit(
+  stderrPath: string,
+  stdoutPath: string,
+): number | null {
+  // Claude prints the friendly "You've hit your limit" message to stdout, not
+  // stderr — so we have to scan both files. Keep stderr first since the older
+  // machine-readable formats (pattern 1) historically lived there.
+  for (const p of [stderrPath, stdoutPath]) {
+    const ts = detectRateLimitFromFile(p);
+    if (ts !== null) return ts;
+  }
+  return null;
+}
+
+function detectRateLimitFromFile(filePath: string): number | null {
+  try {
+    if (!existsSync(filePath)) return null;
+    const content = readFileSync(filePath, "utf8");
     // Read only the last 8KB; rate-limit message is usually the last thing.
     const tail = content.slice(-8192);
     // Pattern 1: "Claude AI usage limit reached|<unix_ts>"
@@ -279,8 +348,22 @@ function detectRateLimitFromStderr(stderrPath: string): number | null {
       const ts = new Date(m2[1]).getTime();
       if (Number.isFinite(ts)) return ts;
     }
-    // Pattern 3: explicit "rate limit" / "5-hour limit" without parsable time.
-    if (/rate ?limit|5-?hour limit|usage limit/i.test(tail)) {
+    // Pattern 3: friendly "You've hit your limit · resets <h>:<mm><am|pm> (<tz>)"
+    // (this is the format Claude Code currently prints to stdout)
+    const m3 = tail.match(
+      /(?:You(?:'ve)? hit your limit|usage limit)[^·\n]*[·\n]\s*resets?\s+(\d{1,2}):?(\d{2})?\s*(am|pm)\s*\(([^)]+)\)/i,
+    );
+    if (m3) {
+      let h = parseInt(m3[1], 10);
+      const min = m3[2] ? parseInt(m3[2], 10) : 0;
+      const ampm = m3[3].toLowerCase();
+      if (ampm === "pm" && h !== 12) h += 12;
+      if (ampm === "am" && h === 12) h = 0;
+      const ts = nextOccurrenceInTz(h, min, m3[4]);
+      if (ts) return ts;
+    }
+    // Pattern 4: explicit "rate limit" / "5-hour limit" without parsable time.
+    if (/rate ?limit|5-?hour limit|usage limit|hit your limit/i.test(tail)) {
       // Default: try in 5 minutes.
       return Date.now() + 5 * 60 * 1000;
     }
@@ -306,7 +389,10 @@ function handleAgentExit(
     `[sup] agent ${la.agent.name} pid=${exitedPid} exited (code=${code ?? "?"} signal=${signal ?? "?"})`,
   );
   if (la.agent.enabled && la.agent.keepAlive) {
-    const limitUntil = detectRateLimitFromStderr(la.runtime.stderrLogPath);
+    const limitUntil = detectRateLimit(
+      la.runtime.stderrLogPath,
+      la.runtime.stdoutLogPath,
+    );
     if (limitUntil && limitUntil > Date.now()) {
       la.runtime.rateLimitedUntil = limitUntil;
       scheduleRestart(la, limitUntil + 5_000);
@@ -355,6 +441,49 @@ function pollStuckAgents(): void {
     // Clear so we don't spam SIGTERM every 30s — pollExitedAgents will take
     // it from here once the OS reaps the process.
     la.lastActivityAt = now;
+  }
+}
+
+/**
+ * Detect agents that are alive and producing tool calls but have stopped
+ * making concrete progress — e.g., looping on `echo "ok"` heartbeats after
+ * exhausting obvious next steps. Trigger: in the past STAGNATION_WINDOW_MS,
+ * STAGNATION_MIN_EVENTS+ tool calls, none of which were progress tools
+ * (Edit/Write/MultiEdit/NotebookEdit). Kill the process group; the next
+ * spawn picks up `pendingExtraContext` to nudge the model back into real
+ * work.
+ *
+ * Intentionally does NOT inspect command content (no banned commands) — a
+ * legitimate `echo` or `sleep` mid-build is fine. The signal is the absence
+ * of edits over a sustained window.
+ */
+function pollStagnantAgents(): void {
+  const now = Date.now();
+  const cutoff = now - STAGNATION_WINDOW_MS;
+  for (const la of live.values()) {
+    if (!la.runtime.alive || la.runtime.pid === null) continue;
+    if (!la.agent.enabled || !la.agent.keepAlive) continue;
+    // Skip if the process hasn't been alive long enough to have a full
+    // window's worth of activity yet.
+    if (la.runtime.startedAt && now - la.runtime.startedAt < STAGNATION_WINDOW_MS) {
+      continue;
+    }
+    const recent = la.recentToolCalls.filter((c) => c.ts >= cutoff);
+    if (recent.length < STAGNATION_MIN_EVENTS) continue;
+    const progress = recent.filter((c) => PROGRESS_TOOLS.has(c.name)).length;
+    if (progress > 0) continue;
+    console.warn(
+      `[sup] agent ${la.agent.name} pid=${la.runtime.pid} stagnant: ${recent.length} tool calls in last ${STAGNATION_WINDOW_MS / 60000}m, 0 edits — killing to force restart with extra context`,
+    );
+    la.pendingExtraContext = STAGNATION_RESTART_CONTEXT;
+    la.recentToolCalls = [];
+    try {
+      process.kill(-la.runtime.pid, "SIGTERM");
+    } catch {
+      try {
+        process.kill(la.runtime.pid, "SIGTERM");
+      } catch {}
+    }
   }
 }
 
@@ -494,6 +623,14 @@ async function tailFromOffset(la: LiveAgent): Promise<void> {
   for (const line of text.split("\n")) {
     for (const ev of parseLine(line)) {
       la.lastActivityAt = Date.now();
+      if (ev.kind === "tool_use") {
+        la.recentToolCalls.push({ name: ev.name, ts: ev.ts });
+        // Keep buffer bounded; pollStagnantAgents only looks at the recent
+        // window anyway.
+        if (la.recentToolCalls.length > 200) {
+          la.recentToolCalls.splice(0, la.recentToolCalls.length - 200);
+        }
+      }
       broadcastFn({ type: "transcript", agentId: la.agent.id, event: ev });
     }
   }
@@ -585,6 +722,8 @@ export function createAgent(agent: Agent): LiveAgent {
     spawnedAt: null,
     lastActivityAt: null,
     usedSessionPaths: new Set(),
+    recentToolCalls: [],
+    pendingExtraContext: null,
   };
   live.set(agent.id, la);
   persistAgent(agent);
@@ -652,6 +791,8 @@ export function init(): void {
       spawnedAt: null,
       lastActivityAt: null,
       usedSessionPaths: new Set(),
+      recentToolCalls: [],
+      pendingExtraContext: null,
     };
     // Reattach to existing live process if PID file exists.
     const existingPid = readPidFile(a.id);
@@ -681,5 +822,6 @@ export function init(): void {
   }
   setInterval(pollExitedAgents, 2000);
   setInterval(pollStuckAgents, 30_000);
+  setInterval(pollStagnantAgents, 60_000);
   startSessionTailers();
 }
