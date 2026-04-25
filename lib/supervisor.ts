@@ -180,17 +180,18 @@ export function setBroadcaster(fn: Broadcast): void {
 
 const NEVER_EXIT_CODA = `Begin. This session must never end voluntarily. Do not ask questions, do not declare yourself done, do not exit. If you believe the immediate task is complete, find related work: deepen, refactor, cross-link, stress-test, or explore adjacent questions. Always have a next tool call queued.`;
 
-function buildPrompt(agent: Agent): string {
+export function buildPrompt(agent: Agent, extraContext?: string | null): string {
+  const tail = extraContext ? `\n\n${extraContext}` : "";
   if (agent.direction.kind === "inline") {
-    return `${agent.direction.prompt}\n\n${NEVER_EXIT_CODA}`;
+    return `${agent.direction.prompt}\n\n${NEVER_EXIT_CODA}${tail}`;
   }
   // file-mode: re-read on every spawn so edits to the file take effect next turn.
   const fp = agent.direction.filePath;
   if (!existsSync(fp)) {
-    return `Your steering file ${fp} does not exist yet. Create it and begin work.\n\n${NEVER_EXIT_CODA}`;
+    return `Your steering file ${fp} does not exist yet. Create it and begin work.\n\n${NEVER_EXIT_CODA}${tail}`;
   }
   const body = readFileSync(fp, "utf8");
-  return `Your steering file is ${fp}. Re-read it often. Current contents follow:\n\n---\n${body}\n---\n\n${NEVER_EXIT_CODA}`;
+  return `Your steering file is ${fp}. Re-read it often. Current contents follow:\n\n---\n${body}\n---\n\n${NEVER_EXIT_CODA}${tail}`;
 }
 
 function spawnAgent(la: LiveAgent): void {
@@ -200,11 +201,8 @@ function spawnAgent(la: LiveAgent): void {
   }
   const stdoutFd = openSync(la.runtime.stdoutLogPath, "a");
   const stderrFd = openSync(la.runtime.stderrLogPath, "a");
-  let prompt = buildPrompt(agent);
-  if (la.pendingExtraContext) {
-    prompt = `${prompt}\n\n${la.pendingExtraContext}`;
-    la.pendingExtraContext = null;
-  }
+  const prompt = buildPrompt(agent, la.pendingExtraContext);
+  la.pendingExtraContext = null;
 
   const args = [
     "--dangerously-skip-permissions",
@@ -286,7 +284,7 @@ function spawnAgent(la: LiveAgent): void {
  * each instant's tz wall-clock components via Intl. Avoids hand-rolled
  * offset math, which is brittle around DST transitions.
  */
-function nextOccurrenceInTz(
+export function nextOccurrenceInTz(
   hour24: number,
   minute: number,
   tz: string,
@@ -313,7 +311,7 @@ function nextOccurrenceInTz(
   }
 }
 
-function detectRateLimit(
+export function detectRateLimit(
   stderrPath: string,
   stdoutPath: string,
 ): number | null {
@@ -327,7 +325,7 @@ function detectRateLimit(
   return null;
 }
 
-function detectRateLimitFromFile(filePath: string): number | null {
+export function detectRateLimitFromFile(filePath: string): number | null {
   try {
     if (!existsSync(filePath)) return null;
     const content = readFileSync(filePath, "utf8");
@@ -457,23 +455,37 @@ function pollStuckAgents(): void {
  * legitimate `echo` or `sleep` mid-build is fine. The signal is the absence
  * of edits over a sustained window.
  */
+/**
+ * Pure stagnation predicate — extracted so it's unit-testable. Returns the
+ * count of in-window tool calls when stagnant; null otherwise.
+ */
+export function isStagnant(
+  toolCalls: { name: string; ts: number }[],
+  now: number,
+  startedAt: number | null,
+): number | null {
+  if (startedAt !== null && now - startedAt < STAGNATION_WINDOW_MS) return null;
+  const cutoff = now - STAGNATION_WINDOW_MS;
+  const recent = toolCalls.filter((c) => c.ts >= cutoff);
+  if (recent.length < STAGNATION_MIN_EVENTS) return null;
+  const progress = recent.filter((c) => PROGRESS_TOOLS.has(c.name)).length;
+  if (progress > 0) return null;
+  return recent.length;
+}
+
 function pollStagnantAgents(): void {
   const now = Date.now();
-  const cutoff = now - STAGNATION_WINDOW_MS;
   for (const la of live.values()) {
     if (!la.runtime.alive || la.runtime.pid === null) continue;
     if (!la.agent.enabled || !la.agent.keepAlive) continue;
-    // Skip if the process hasn't been alive long enough to have a full
-    // window's worth of activity yet.
-    if (la.runtime.startedAt && now - la.runtime.startedAt < STAGNATION_WINDOW_MS) {
-      continue;
-    }
-    const recent = la.recentToolCalls.filter((c) => c.ts >= cutoff);
-    if (recent.length < STAGNATION_MIN_EVENTS) continue;
-    const progress = recent.filter((c) => PROGRESS_TOOLS.has(c.name)).length;
-    if (progress > 0) continue;
+    const stagnantCount = isStagnant(
+      la.recentToolCalls,
+      now,
+      la.runtime.startedAt,
+    );
+    if (stagnantCount === null) continue;
     console.warn(
-      `[sup] agent ${la.agent.name} pid=${la.runtime.pid} stagnant: ${recent.length} tool calls in last ${STAGNATION_WINDOW_MS / 60000}m, 0 edits — killing to force restart with extra context`,
+      `[sup] agent ${la.agent.name} pid=${la.runtime.pid} stagnant: ${stagnantCount} tool calls in last ${STAGNATION_WINDOW_MS / 60000}m, 0 edits — killing to force restart with extra context`,
     );
     la.pendingExtraContext = STAGNATION_RESTART_CONTEXT;
     la.recentToolCalls = [];
