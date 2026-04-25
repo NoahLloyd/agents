@@ -837,3 +837,14 @@ export function init(): void {
   setInterval(pollStagnantAgents, 60_000);
   startSessionTailers();
 }
+
+// Test-only escape hatch — exposes the live registry and the polling/spawn
+// internals so integration tests can drive the supervisor without the full
+// init() (which would start setIntervals and spawn the real claude binary).
+// Not for use by any production code path.
+export const __test = {
+  live,
+  spawnAgent,
+  pollStagnantAgents,
+  pollExitedAgents,
+};
