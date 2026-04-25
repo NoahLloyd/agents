@@ -7,7 +7,8 @@
     "dev:web": "next dev -p 4000",
     "dev:ws": "bun --watch ws-server.ts",
     "build": "next build",
-    "start": "next start -p 4000"
+    "start": "next start -p 4000",
+    "test": "bun test"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.0",
