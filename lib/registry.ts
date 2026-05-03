@@ -42,8 +42,8 @@ export function saveAgents(agents: Agent[]): void {
 }
 
 export function projectSlug(workingDir: string): string {
-  // Claude Code derives ~/.claude/projects/<slug> by replacing / with -.
-  return workingDir.replace(/\//g, "-");
+  // Claude Code derives ~/.claude/projects/<slug> by replacing all non-alphanumeric chars with -.
+  return workingDir.replace(/[^a-zA-Z0-9]+/g, "-");
 }
 
 export function sessionsDirFor(workingDir: string): string {
