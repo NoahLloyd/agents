@@ -7,7 +7,7 @@ export type AppConfig = {
 };
 
 const DEFAULTS: AppConfig = {
-  vaultDir: "/Users/noah/AI-safety",
+  vaultDir: path.join(process.env.HOME ?? "/root", "AI-safety"),
 };
 
 function configPath(): string {

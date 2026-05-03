@@ -2,10 +2,10 @@ import { NextResponse } from "next/server";
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { getVaultDir } from "@/lib/vault";
+import { isPathAllowed } from "@/lib/paths";
 
 export const dynamic = "force-dynamic";
 
-const HOME = process.env.HOME ?? "/Users/noah";
 const SKIP_DIRS = new Set([".git", ".obsidian", "node_modules", "logs", "state"]);
 const EXTS = new Set([".md", ".txt", ".markdown"]);
 
@@ -43,7 +43,7 @@ export async function GET(req: Request) {
   let root = getVaultDir();
   if (rootParam) {
     const abs = path.resolve(rootParam);
-    if (abs.startsWith(HOME + "/") || abs === HOME) root = abs;
+    if (isPathAllowed(abs)) root = abs;
   }
   try {
     await stat(root);

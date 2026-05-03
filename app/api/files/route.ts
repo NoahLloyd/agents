@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { readdirSync, statSync } from "node:fs";
 import path from "node:path";
+import { isPathAllowed, expandHome } from "@/lib/paths";
 
 export const dynamic = "force-dynamic";
 
-const HOME = process.env.HOME ?? "/Users/noah";
+const HOME = process.env.HOME ?? "/root";
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
@@ -13,7 +14,7 @@ export async function GET(req: Request) {
   let dir: string;
   let partial: string;
 
-  const expanded = prefix.startsWith("~") ? HOME + prefix.slice(1) : prefix;
+  const expanded = expandHome(prefix);
   const abs = path.isAbsolute(expanded) ? expanded : path.join(HOME, expanded);
 
   try {
@@ -31,7 +32,7 @@ export async function GET(req: Request) {
   }
 
   const safeDir = path.resolve(dir);
-  if (!safeDir.startsWith(HOME)) {
+  if (!isPathAllowed(safeDir)) {
     return NextResponse.json({ entries: [] });
   }
 

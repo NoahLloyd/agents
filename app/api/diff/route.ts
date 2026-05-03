@@ -3,17 +3,15 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { getVaultDir } from "@/lib/vault";
+import { isPathAllowed } from "@/lib/paths";
 
 export const dynamic = "force-dynamic";
-
-const HOME = process.env.HOME ?? "/Users/noah";
 
 function safeWorkingDir(p: string | null): string {
   const vault = getVaultDir();
   if (!p) return vault;
   const abs = path.resolve(p);
-  if (!abs.startsWith(HOME + "/") && abs !== HOME) return vault;
-  return abs;
+  return isPathAllowed(abs) ? abs : vault;
 }
 
 function runGit(

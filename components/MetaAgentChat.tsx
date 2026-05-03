@@ -50,9 +50,18 @@ type Entry =
       durationMs?: number;
     };
 
+type SavedConversation = {
+  sessionId: string;
+  title: string;
+  timestamp: number;
+  entries: Entry[];
+};
+
 const HISTORY_KEY = "meta-agent.history.v2";
 const SESSION_KEY = "meta-agent.session.v1";
+const CONVERSATIONS_KEY = "meta-agent.conversations.v1";
 const MODEL_LABEL = "claude-sonnet-4-6";
+const MAX_SAVED = 30;
 
 const SUGGESTIONS = [
   "What agents are running and how are they doing?",
@@ -72,6 +81,27 @@ function tryParseJson(s: string): unknown {
   }
 }
 
+function conversationTitle(entries: Entry[]): string {
+  const first = entries.find((e) => e.role === "user");
+  if (!first || first.role !== "user") return "Untitled";
+  return first.text.slice(0, 60) + (first.text.length > 60 ? "…" : "");
+}
+
+function loadConversations(): SavedConversation[] {
+  try {
+    const raw = localStorage.getItem(CONVERSATIONS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as SavedConversation[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveConversations(convs: SavedConversation[]): void {
+  localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(convs));
+}
+
 type Props = {
   onClose: () => void;
 };
@@ -82,6 +112,8 @@ export default function MetaAgentChat({ onClose }: Props) {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [conversations, setConversations] = useState<SavedConversation[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const innerRef = useRef<HTMLDivElement | null>(null);
@@ -99,6 +131,7 @@ export default function MetaAgentChat({ onClose }: Props) {
       const sid = localStorage.getItem(SESSION_KEY);
       if (sid) setSessionId(sid);
     } catch {}
+    setConversations(loadConversations());
   }, []);
 
   useEffect(() => {
@@ -161,6 +194,10 @@ export default function MetaAgentChat({ onClose }: Props) {
   };
 
   useEffect(() => {
+    if (!historyOpen) inputRef.current?.focus();
+  }, [historyOpen]);
+
+  useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
@@ -175,17 +212,67 @@ export default function MetaAgentChat({ onClose }: Props) {
     [],
   );
 
+  const saveCurrentToHistory = useCallback(
+    (currentEntries: Entry[], currentSessionId: string | null) => {
+      if (currentEntries.length === 0 || !currentSessionId) return;
+      const conv: SavedConversation = {
+        sessionId: currentSessionId,
+        title: conversationTitle(currentEntries),
+        timestamp: Date.now(),
+        entries: currentEntries,
+      };
+      setConversations((prev) => {
+        // Replace if same sessionId, otherwise prepend (cap at MAX_SAVED)
+        const filtered = prev.filter((c) => c.sessionId !== currentSessionId);
+        const next = [conv, ...filtered].slice(0, MAX_SAVED);
+        saveConversations(next);
+        return next;
+      });
+    },
+    [],
+  );
+
   const newChat = useCallback(() => {
     if (streaming) return;
+    // Save current before clearing
+    saveCurrentToHistory(entries, sessionId);
     setEntries([]);
     setSessionId(null);
     setError(null);
-  }, [streaming]);
+    setHistoryOpen(false);
+  }, [streaming, entries, sessionId, saveCurrentToHistory]);
+
+  const restoreConversation = useCallback(
+    (conv: SavedConversation) => {
+      if (streaming) return;
+      // Save current first if it's different
+      saveCurrentToHistory(entries, sessionId);
+      setEntries(conv.entries);
+      setSessionId(conv.sessionId);
+      setError(null);
+      setHistoryOpen(false);
+      // Scroll to bottom
+      stuckRef.current = true;
+      setStuckUI(true);
+    },
+    [streaming, entries, sessionId, saveCurrentToHistory],
+  );
+
+  const deleteConversation = useCallback(
+    (sessionId: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      setConversations((prev) => {
+        const next = prev.filter((c) => c.sessionId !== sessionId);
+        saveConversations(next);
+        return next;
+      });
+    },
+    [],
+  );
 
   const sendMessage = useCallback(
     async (text: string) => {
       if (!text.trim()) return;
-      // Abort any in-flight request before sending a new message.
       if (abortRef.current) abortRef.current.abort();
       setError(null);
       stuckRef.current = true;
@@ -277,6 +364,70 @@ export default function MetaAgentChat({ onClose }: Props) {
     abortRef.current?.abort();
   }, []);
 
+  if (historyOpen) {
+    return (
+      <div className="relative flex h-full flex-col bg-zinc-950">
+        <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-zinc-800 px-3">
+          <span className="text-sm font-medium text-zinc-200">History</span>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setHistoryOpen(false)}
+              className="rounded px-2 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              ← back
+            </button>
+            <button
+              onClick={onClose}
+              className="rounded px-2 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+              title="Close"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {conversations.length === 0 ? (
+            <div className="flex h-full items-center justify-center text-xs text-zinc-600">
+              no saved conversations yet
+            </div>
+          ) : (
+            <div className="divide-y divide-zinc-800/60">
+              {conversations.map((conv) => (
+                <button
+                  key={conv.sessionId}
+                  onClick={() => restoreConversation(conv)}
+                  className="group flex w-full items-start gap-2 px-3 py-2.5 text-left hover:bg-zinc-900"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-xs text-zinc-200">{conv.title}</div>
+                    <div className="mt-0.5 text-[10px] text-zinc-600">
+                      {new Date(conv.timestamp).toLocaleString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        hour12: false,
+                      })}
+                      {" · "}
+                      <span className="font-mono">{conv.sessionId.slice(0, 8)}</span>
+                    </div>
+                  </div>
+                  <span
+                    onClick={(e) => deleteConversation(conv.sessionId, e)}
+                    className="mt-0.5 shrink-0 text-[10px] text-zinc-700 opacity-0 hover:text-red-400 group-hover:opacity-100"
+                    title="delete"
+                  >
+                    ✕
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="relative flex h-full flex-col bg-zinc-950">
       <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-zinc-800 px-3">
@@ -298,10 +449,17 @@ export default function MetaAgentChat({ onClose }: Props) {
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <button
+            onClick={() => setHistoryOpen(true)}
+            className="rounded px-2 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+            title="Past conversations"
+          >
+            history{conversations.length > 0 ? ` (${conversations.length})` : ""}
+          </button>
+          <button
             onClick={newChat}
             disabled={streaming || entries.length === 0}
             className="rounded px-2 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40 disabled:hover:bg-transparent"
-            title="Reset session"
+            title="Save and start new session"
           >
             new
           </button>
@@ -372,7 +530,6 @@ export default function MetaAgentChat({ onClose }: Props) {
             rows={2}
             className="w-full resize-none bg-transparent px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-600"
           />
-
         </div>
       </form>
     </div>
@@ -401,7 +558,7 @@ function EmptyState({ onPick }: { onPick: (s: string) => void }) {
         <code className="rounded bg-zinc-800 px-1 py-0.5 font-mono text-zinc-400">
           /new
         </code>{" "}
-        reset session
+        save and reset session
       </div>
     </div>
   );

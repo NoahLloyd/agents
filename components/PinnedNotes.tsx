@@ -5,9 +5,15 @@ import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 
 const STORAGE_KEY = "agents.pinnedNotes.v1";
-const DEFAULT_PIN = "/Users/noah/AI-safety/Noah's notes.md";
 const AUTOSAVE_DELAY_MS = 1200;
-const FIRST_LOAD_KEY = "agents.pinnedNotes.firstLoadDone";
+
+const TEXT_EXTS = new Set([".md", ".txt", ".markdown", ".mdx"]);
+
+function hasTextExt(p: string): boolean {
+  const dot = p.lastIndexOf(".");
+  if (dot === -1) return false;
+  return TEXT_EXTS.has(p.slice(dot).toLowerCase());
+}
 
 type Pin = { path: string; label: string };
 
@@ -15,15 +21,7 @@ function loadPins(): Pin[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw === null) {
-      // Very first load ever: seed with Noah's notes. After this we trust
-      // whatever the user has — including an empty list.
-      if (!localStorage.getItem(FIRST_LOAD_KEY)) {
-        localStorage.setItem(FIRST_LOAD_KEY, "1");
-        return [{ path: DEFAULT_PIN, label: "Noah's notes" }];
-      }
-      return [];
-    }
+    if (raw === null) return [];
     const parsed = JSON.parse(raw) as Pin[];
     return Array.isArray(parsed) ? parsed : [];
   } catch {
@@ -123,7 +121,7 @@ export default function PinnedNotes() {
           ref={addBtnRef}
           onClick={() => setSearchOpen((o) => !o)}
           className="ml-auto inline-flex h-full shrink-0 items-center px-2 text-xs text-zinc-500 hover:text-zinc-200"
-          title="pin another note"
+          title="pin a file"
         >
           + pin
         </button>
@@ -142,12 +140,14 @@ export default function PinnedNotes() {
         <NoteEditor key={active.path} pin={active} />
       ) : (
         <div className="flex flex-1 items-center justify-center text-xs text-zinc-600">
-          no pinned notes — click <span className="mx-1 text-zinc-400">+ pin</span> to add one
+          no pinned files — click <span className="mx-1 text-zinc-400">+ pin</span> to add one
         </div>
       )}
     </div>
   );
 }
+
+type FsEntry = { path: string; isDir: boolean };
 
 function PinSearch({
   anchorRef,
@@ -159,15 +159,48 @@ function PinSearch({
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<{ absPath: string; relPath: string; name: string }[]>([]);
+  const [entries, setEntries] = useState<FsEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
   const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Anchor the dropdown to the + pin button. Portaled into document.body so
-  // ancestors with overflow-hidden don't clip it.
+  // Fetch the server-configured workspace root and start there.
+  useEffect(() => {
+    fetch("/api/workspace")
+      .then((r) => r.json())
+      .then((d: { workspace: string }) => {
+        setQuery(d.workspace + "/");
+      })
+      .catch(() => setQuery("~/"));
+  }, []);
+
+  const fetchEntries = (q: string) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    setLoading(true);
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const r = await fetch(`/api/files?q=${encodeURIComponent(q)}`);
+        const j = (await r.json()) as { entries: FsEntry[] };
+        setEntries(j.entries ?? []);
+        setActiveIdx(0);
+      } catch {
+        setEntries([]);
+      } finally {
+        setLoading(false);
+      }
+    }, 80);
+  };
+
+  // Fetch on mount (list home dir) and whenever query changes
+  useEffect(() => {
+    if (query) fetchEntries(query);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
+
+  // Position dropdown anchored to the "+ pin" button
   useLayoutEffect(() => {
     const recompute = () => {
       const rect = anchorRef.current?.getBoundingClientRect();
@@ -187,6 +220,7 @@ function PinSearch({
     };
   }, [anchorRef]);
 
+  // Close on outside click
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
       const target = e.target as Node;
@@ -202,45 +236,64 @@ function PinSearch({
     return () => document.removeEventListener("mousedown", onClick);
   }, [onClose, anchorRef]);
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    const t = setTimeout(async () => {
-      try {
-        const r = await fetch(
-          `/api/vault-files?q=${encodeURIComponent(query)}`,
-        );
-        const j = (await r.json()) as { files: typeof results };
-        if (!cancelled) {
-          setResults(j.files);
-          setActiveIdx(0);
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }, 120);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [query]);
+  const pick = (entry: FsEntry) => {
+    if (entry.isDir) {
+      // Navigate into directory
+      setQuery(entry.path + "/");
+      inputRef.current?.focus();
+    } else {
+      onPick(entry.path);
+    }
+  };
+
+  const confirmQuery = () => {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    // If it's a file entry in the list, pin it
+    const active = entries[activeIdx];
+    if (active && !active.isDir) {
+      onPick(active.path);
+      return;
+    }
+    // If it's a dir entry, navigate in
+    if (active && active.isDir) {
+      setQuery(active.path + "/");
+      return;
+    }
+    // Otherwise pin the typed path directly (creates file if needed)
+    if (trimmed.startsWith("/") || trimmed.startsWith("~/") || trimmed === "~") {
+      onPick(trimmed);
+    }
+  };
 
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
       onClose();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActiveIdx((i) => Math.min(results.length - 1, i + 1));
+      setActiveIdx((i) => Math.min(entries.length - 1, i + 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActiveIdx((i) => Math.max(0, i - 1));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const r = results[activeIdx];
-      if (r) onPick(r.absPath);
-      else if (query.trim().startsWith("/")) onPick(query.trim());
+      confirmQuery();
+    } else if (e.key === "Tab" && entries.length > 0) {
+      e.preventDefault();
+      const target = entries[activeIdx >= 0 ? activeIdx : 0];
+      if (target) pick(target);
+    } else if (e.key === "Backspace" && query.endsWith("/") && query.length > 1) {
+      // Navigate up one level
+      e.preventDefault();
+      const parent = query.slice(0, -1).split("/").slice(0, -1).join("/") + "/";
+      setQuery(parent || "~/");
     }
   };
+
+  const trimmedQuery = query.trim();
+  const looksLikePath = trimmedQuery.startsWith("/") || trimmedQuery.startsWith("~/");
+  const isNewFile = looksLikePath && entries.length === 0 && !loading && hasTextExt(trimmedQuery);
+  const canPin = looksLikePath && entries.length === 0 && !loading && trimmedQuery.length > 1;
 
   if (pos === null) return null;
 
@@ -256,35 +309,49 @@ function PinSearch({
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         onKeyDown={onKey}
-        placeholder="search vault notes (or paste absolute path)"
-        className="w-full border-b border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 outline-none placeholder:text-zinc-600"
+        placeholder="type a path, e.g. ~/notes/todo.md"
+        className="w-full border-b border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-xs text-zinc-100 outline-none placeholder:text-zinc-600 placeholder:font-sans"
       />
       <div className="max-h-72 overflow-auto">
-        {loading && results.length === 0 && (
-          <div className="px-3 py-2 text-xs text-zinc-600">searching…</div>
+        {loading && entries.length === 0 && (
+          <div className="px-3 py-2 text-xs text-zinc-600">loading…</div>
         )}
-        {!loading && results.length === 0 && (
-          <div className="px-3 py-2 text-xs text-zinc-600">
-            {query.trim().startsWith("/")
-              ? "press Enter to pin this absolute path"
-              : "no matches"}
+        {!loading && entries.length === 0 && isNewFile && (
+          <div className="px-3 py-2 text-xs text-zinc-500">
+            press <span className="font-mono text-emerald-400">Enter</span> to pin and create this file
           </div>
         )}
-        {results.map((r, i) => (
-          <button
-            key={r.absPath}
-            onMouseEnter={() => setActiveIdx(i)}
-            onClick={() => onPick(r.absPath)}
-            className={`flex w-full flex-col items-start gap-0 px-3 py-1.5 text-left text-xs ${
-              i === activeIdx ? "bg-zinc-800" : "hover:bg-zinc-800/50"
-            }`}
-          >
-            <span className="text-zinc-200">{r.name.replace(/\.[^.]+$/, "")}</span>
-            <span className="truncate text-[10px] text-zinc-500 font-mono w-full">
-              {r.relPath}
-            </span>
-          </button>
-        ))}
+        {!loading && entries.length === 0 && canPin && !isNewFile && (
+          <div className="px-3 py-2 text-xs text-zinc-500">
+            press <span className="font-mono text-zinc-400">Enter</span> to pin this path
+          </div>
+        )}
+        {!loading && entries.length === 0 && !looksLikePath && (
+          <div className="px-3 py-2 text-xs text-zinc-600">
+            type a path like <span className="font-mono text-zinc-400">~/</span> to browse
+          </div>
+        )}
+        {entries.map((entry, i) => {
+          const name = entry.path.split("/").pop() ?? entry.path;
+          return (
+            <button
+              key={entry.path}
+              onMouseDown={(e) => { e.preventDefault(); pick(entry); }}
+              onMouseEnter={() => setActiveIdx(i)}
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-xs ${
+                i === activeIdx ? "bg-zinc-800 text-zinc-100" : "text-zinc-300 hover:bg-zinc-800/50"
+              }`}
+            >
+              <span className="shrink-0 text-zinc-600">{entry.isDir ? "▸" : "·"}</span>
+              <span className="min-w-0 truncate">
+                {entry.isDir ? name + "/" : name}
+              </span>
+              {!entry.isDir && hasTextExt(entry.path) && (
+                <span className="ml-auto shrink-0 text-[10px] text-zinc-600">pin</span>
+              )}
+            </button>
+          );
+        })}
       </div>
     </div>,
     document.body,
@@ -297,15 +364,18 @@ function NoteEditor({ pin }: { pin: Pin }) {
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [isNewFile, setIsNewFile] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     setLoadErr(null);
+    setIsNewFile(false);
     void api
       .readFile(pin.path)
       .then((r) => {
         setContent(r.content);
         setSavedContent(r.content);
+        if ((r as { new?: boolean }).new) setIsNewFile(true);
       })
       .catch((e) => setLoadErr((e as Error).message));
   }, [pin.path]);
@@ -318,6 +388,7 @@ function NoteEditor({ pin }: { pin: Pin }) {
       await api.writeFile(pin.path, text);
       setSavedContent(text);
       setSavedAt(Date.now());
+      setIsNewFile(false);
     } finally {
       setSaving(false);
     }
@@ -364,6 +435,9 @@ function NoteEditor({ pin }: { pin: Pin }) {
   } else if (dirty) {
     statusLabel = "unsaved (autosaving)";
     statusClass = "text-amber-400";
+  } else if (isNewFile && savedAt === null) {
+    statusLabel = "new file — start typing to create";
+    statusClass = "text-emerald-600";
   } else if (savedAt) {
     statusLabel = `saved ${new Date(savedAt).toLocaleTimeString(undefined, { hour12: false })}`;
   } else {
@@ -373,7 +447,7 @@ function NoteEditor({ pin }: { pin: Pin }) {
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
       <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-1 text-[10px]">
-        <span className="truncate text-zinc-600 font-mono">{pin.path}</span>
+        <span className="truncate font-mono text-zinc-600">{pin.path}</span>
         <span className={statusClass}>{statusLabel}</span>
       </div>
       <textarea
@@ -382,7 +456,13 @@ function NoteEditor({ pin }: { pin: Pin }) {
         spellCheck={false}
         disabled={!!loadErr}
         className="flex-1 resize-none bg-zinc-950 px-4 py-3 font-mono text-xs text-zinc-200 outline-none disabled:opacity-50"
-        placeholder={loadErr ? "" : "Edit and the agent will pick it up next turn."}
+        placeholder={
+          loadErr
+            ? ""
+            : isNewFile
+            ? "New file. Start typing — it will be saved automatically."
+            : "Edit and the agent will pick it up next turn."
+        }
       />
     </div>
   );

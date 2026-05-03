@@ -5,8 +5,8 @@ import FileInput from "@/components/FileInput";
 import type { Agent } from "@/lib/types";
 import { api } from "@/lib/api";
 
-const DEFAULT_WORKING_DIR = "/Users/noah/AI-safety";
-const DEFAULT_NOTES_FILE = "/Users/noah/AI-safety/Noah's notes.md";
+const DEFAULT_WORKING_DIR = "/home/noah/AI-safety";
+const DEFAULT_NOTES_FILE = "/home/noah/AI-safety/Noah's notes.md";
 
 export default function NewAgentDialog({
   onClose,

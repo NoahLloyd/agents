@@ -5,9 +5,9 @@ import path from "node:path";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "/Users/noah/.bun/bin/claude";
-const BUN_BIN = process.env.BUN_BIN ?? "/Users/noah/.bun/bin/bun";
-const HOME = process.env.HOME ?? "/Users/noah";
+const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
+const BUN_BIN = process.env.BUN_BIN ?? "bun";
+const HOME = process.env.HOME ?? "/root";
 const PROJECT_ROOT = process.cwd();
 const MCP_SCRIPT = path.join(PROJECT_ROOT, "mcp-houston.ts");
 
@@ -116,8 +116,6 @@ export async function POST(req: Request) {
 
       const spawnEnv = {
         ...cleanEnv,
-        PATH: `/Users/noah/.bun/bin:/Users/noah/.nvm/versions/node/v22.22.0/bin:/usr/local/bin:/usr/bin:/bin`,
-        HOME,
       };
       console.log(`[meta] spawning claude for session ${sessionId}`);
       const child = spawn(CLAUDE_BIN, args, {

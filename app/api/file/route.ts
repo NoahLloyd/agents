@@ -1,16 +1,16 @@
 import { NextResponse } from "next/server";
-import { readFile, writeFile, stat } from "node:fs/promises";
+import { mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
+import { isPathAllowed } from "@/lib/paths";
 
 export const dynamic = "force-dynamic";
 
-const HOME = process.env.HOME ?? "/Users/noah";
+const TEXT_EXTS = new Set([".md", ".txt", ".markdown", ".mdx"]);
 
 function safe(p: string): string | null {
   if (!p) return null;
   const abs = path.resolve(p);
-  if (!abs.startsWith(HOME + "/") && abs !== HOME) return null;
-  return abs;
+  return isPathAllowed(abs) ? abs : null;
 }
 
 export async function GET(req: Request) {
@@ -24,7 +24,12 @@ export async function GET(req: Request) {
     if (!s.isFile()) return NextResponse.json({ error: "not a file" }, { status: 400 });
     const content = await readFile(abs, "utf8");
     return NextResponse.json({ content, path: abs, mtimeMs: s.mtimeMs });
-  } catch (e) {
+  } catch (e: unknown) {
+    // If the file doesn't exist but has a text extension, treat it as a new empty file.
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" && TEXT_EXTS.has(path.extname(abs).toLowerCase())) {
+      return NextResponse.json({ content: "", path: abs, mtimeMs: null, new: true });
+    }
     return NextResponse.json({ error: (e as Error).message }, { status: 404 });
   }
 }
@@ -36,6 +41,7 @@ export async function PUT(req: Request) {
   }
   const abs = safe(p);
   if (!abs) return NextResponse.json({ error: "forbidden path" }, { status: 403 });
+  await mkdir(path.dirname(abs), { recursive: true });
   await writeFile(abs, content, "utf8");
   return NextResponse.json({ ok: true });
 }

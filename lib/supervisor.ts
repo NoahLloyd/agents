@@ -22,8 +22,7 @@ import {
 import { parseLine } from "./parse-transcript";
 import type { Agent, AgentRuntime, TranscriptEvent, WsMessage } from "./types";
 
-const CLAUDE_BIN =
-  process.env.CLAUDE_BIN ?? "/Users/noah/.bun/bin/claude";
+const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 
 type Broadcast = (msg: WsMessage) => void;
 
@@ -245,8 +244,6 @@ function spawnAgent(la: LiveAgent): void {
     stdio: ["ignore", stdoutFd, stderrFd],
     env: {
       ...cleanEnv,
-      PATH: `/Users/noah/.bun/bin:/Users/noah/.nvm/versions/node/v22.22.0/bin:/usr/local/bin:/usr/bin:/bin`,
-      HOME: "/Users/noah",
     },
   });
 
