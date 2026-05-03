@@ -1,10 +1,6 @@
 "use client";
 
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
-
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 
@@ -362,40 +358,35 @@ function PinSearch({
   );
 }
 
+
 const IS_MD = (p: string) => /\.(md|mdx|markdown)$/i.test(p);
 
+// ── WYSIWYG markdown editor (TipTap) ─────────────────────────────────────────
+
+import { useEditor, EditorContent } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import { TaskList } from "@tiptap/extension-task-list";
+import { TaskItem } from "@tiptap/extension-task-item";
+import { CodeBlockLowlight } from "@tiptap/extension-code-block-lowlight";
+import { Placeholder } from "@tiptap/extension-placeholder";
+import { Markdown } from "tiptap-markdown";
+import { createLowlight, common } from "lowlight";
+
+const lowlight = createLowlight(common);
+
 function NoteEditor({ pin }: { pin: Pin }) {
-  const [content, setContent] = useState<string>("");
+  const [rawContent, setRawContent] = useState<string | null>(null);
   const [savedContent, setSavedContent] = useState<string>("");
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [isNewFile, setIsNewFile] = useState(false);
-  // Default to preview for existing markdown files, edit for new/text files
-  const [mode, setMode] = useState<"preview" | "edit">(IS_MD(pin.path) ? "preview" : "edit");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const saveRef = useRef<((text: string) => Promise<void>) | null>(null);
 
-  useEffect(() => {
-    setLoadErr(null);
-    setIsNewFile(false);
-    void api
-      .readFile(pin.path)
-      .then((r) => {
-        setContent(r.content);
-        setSavedContent(r.content);
-        const isNew = !!(r as { new?: boolean }).new;
-        setIsNewFile(isNew);
-        // Jump to edit mode for new files so user can start typing immediately
-        if (isNew) setMode("edit");
-        else setMode(IS_MD(pin.path) ? "preview" : "edit");
-      })
-      .catch((e) => setLoadErr((e as Error).message));
-  }, [pin.path]);
+  const isMd = IS_MD(pin.path);
 
-  const dirty = content !== savedContent;
-
-  const save = async (text: string) => {
+  const save = useCallback(async (text: string) => {
     setSaving(true);
     try {
       await api.writeFile(pin.path, text);
@@ -405,103 +396,135 @@ function NoteEditor({ pin }: { pin: Pin }) {
     } finally {
       setSaving(false);
     }
-  };
+  }, [pin.path]);
+
+  useEffect(() => { saveRef.current = save; }, [save]);
+
+  // TipTap editor — only used for markdown files
+  const editor = useEditor(
+    {
+      immediatelyRender: false,
+      extensions: [
+        StarterKit.configure({ codeBlock: false }),
+        TaskList,
+        TaskItem.configure({ nested: true }),
+        CodeBlockLowlight.configure({ lowlight }),
+        Placeholder.configure({ placeholder: "Start writing…" }),
+        Markdown.configure({
+          html: false,
+          tightLists: true,
+          transformPastedText: true,
+        }),
+      ],
+      content: "",
+      editorProps: {
+        attributes: { class: "tiptap-editor" },
+      },
+      onUpdate({ editor }) {
+        if (!isMd) return;
+        const md = (editor.storage as unknown as Record<string, { getMarkdown(): string }>).markdown.getMarkdown();
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = setTimeout(() => {
+          saveRef.current?.(md);
+        }, AUTOSAVE_DELAY_MS);
+      },
+    },
+    [],
+  );
+
+  // Load file content
+  useEffect(() => {
+    setLoadErr(null);
+    setIsNewFile(false);
+    setRawContent(null);
+    void api
+      .readFile(pin.path)
+      .then((r) => {
+        const text = r.content;
+        setRawContent(text);
+        setSavedContent(text);
+        if ((r as { new?: boolean }).new) setIsNewFile(true);
+      })
+      .catch((e) => setLoadErr((e as Error).message));
+  }, [pin.path]);
+
+  // Push loaded content into TipTap once editor + content are both ready
+  useEffect(() => {
+    if (editor && rawContent !== null) {
+      editor.commands.setContent(rawContent);
+    }
+  }, [editor, rawContent]);
+
+  // Plain text autosave (for non-md files)
+  const [plainText, setPlainText] = useState("");
+  useEffect(() => {
+    if (!isMd && rawContent !== null) setPlainText(rawContent);
+  }, [isMd, rawContent]);
 
   useEffect(() => {
+    if (isMd) return;
+    const dirty = plainText !== savedContent;
     if (!dirty) return;
     if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => void save(content), AUTOSAVE_DELAY_MS);
+    timerRef.current = setTimeout(() => { saveRef.current?.(plainText); }, AUTOSAVE_DELAY_MS);
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [content, dirty]);
+  }, [plainText, savedContent, isMd]);
 
+  // Flush on tab close / blur (TipTap path)
   useEffect(() => {
+    if (!isMd || !editor) return;
     const flush = () => {
-      if (dirty) {
-        navigator.sendBeacon(
-          "/api/file",
-          new Blob([JSON.stringify({ path: pin.path, content })], { type: "application/json" }),
-        );
+      const md = (editor.storage as unknown as Record<string, { getMarkdown(): string }>).markdown.getMarkdown();
+      if (md !== savedContent) {
+        navigator.sendBeacon("/api/file",
+          new Blob([JSON.stringify({ path: pin.path, content: md })], { type: "application/json" }));
       }
     };
     window.addEventListener("beforeunload", flush);
-    window.addEventListener("blur", flush);
-    return () => {
-      window.removeEventListener("beforeunload", flush);
-      window.removeEventListener("blur", flush);
-    };
-  }, [content, dirty, pin.path]);
+    return () => window.removeEventListener("beforeunload", flush);
+  }, [isMd, editor, savedContent, pin.path]);
 
-  // Focus textarea when switching to edit mode
+  // Flush on tab close (plain text path)
   useEffect(() => {
-    if (mode === "edit") textareaRef.current?.focus();
-  }, [mode]);
+    if (isMd) return;
+    const flush = () => {
+      if (plainText !== savedContent) {
+        navigator.sendBeacon("/api/file",
+          new Blob([JSON.stringify({ path: pin.path, content: plainText })], { type: "application/json" }));
+      }
+    };
+    window.addEventListener("beforeunload", flush);
+    return () => window.removeEventListener("beforeunload", flush);
+  }, [isMd, plainText, savedContent, pin.path]);
 
   let statusLabel: string;
   let statusClass = "text-zinc-600";
   if (loadErr) { statusLabel = `error: ${loadErr}`; statusClass = "text-red-400"; }
   else if (saving) { statusLabel = "saving…"; statusClass = "text-zinc-400"; }
-  else if (dirty) { statusLabel = "unsaved"; statusClass = "text-amber-400"; }
   else if (isNewFile && savedAt === null) { statusLabel = "new file"; statusClass = "text-emerald-600"; }
   else if (savedAt) { statusLabel = `saved ${new Date(savedAt).toLocaleTimeString(undefined, { hour12: false })}`; }
-  else { statusLabel = "loaded"; }
-
-  const isMd = IS_MD(pin.path);
+  else { statusLabel = rawContent === null ? "loading…" : "loaded"; }
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      {/* Header bar */}
       <div className="flex shrink-0 items-center gap-2 border-b border-zinc-800 px-3 py-1 text-[10px]">
         <span className="min-w-0 flex-1 truncate font-mono text-zinc-600">{pin.path}</span>
         <span className={`shrink-0 ${statusClass}`}>{statusLabel}</span>
-        {isMd && !loadErr && (
-          <div className="flex shrink-0 items-center rounded border border-zinc-800 text-[10px]">
-            <button
-              onClick={() => setMode("preview")}
-              className={`px-2 py-0.5 transition ${mode === "preview" ? "bg-zinc-800 text-zinc-200" : "text-zinc-600 hover:text-zinc-400"}`}
-            >
-              preview
-            </button>
-            <button
-              onClick={() => setMode("edit")}
-              className={`px-2 py-0.5 transition ${mode === "edit" ? "bg-zinc-800 text-zinc-200" : "text-zinc-600 hover:text-zinc-400"}`}
-            >
-              edit
-            </button>
-          </div>
-        )}
       </div>
 
-      {/* Content area */}
-      {mode === "preview" && isMd ? (
-        <div
-          className="md-preview prose prose-sm prose-invert flex-1 overflow-auto px-6 py-4 max-w-none"
-          onClick={() => setMode("edit")}
-          title="Click to edit"
-        >
-          {content.trim() ? (
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              rehypePlugins={[rehypeHighlight]}
-            >
-              {content}
-            </ReactMarkdown>
-          ) : (
-            <p className="italic text-zinc-600">Empty file — click to edit.</p>
-          )}
+      {loadErr ? (
+        <div className="flex flex-1 items-center justify-center px-4 text-xs text-red-400">{loadErr}</div>
+      ) : isMd ? (
+        <div className="tiptap-editor flex-1 overflow-auto">
+          <EditorContent editor={editor} className="h-full" />
         </div>
       ) : (
         <textarea
-          ref={textareaRef}
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
+          value={plainText}
+          onChange={(e) => setPlainText(e.target.value)}
           spellCheck={false}
-          disabled={!!loadErr}
-          className="flex-1 resize-none bg-zinc-950 px-4 py-3 font-mono text-xs text-zinc-200 outline-none disabled:opacity-50"
-          placeholder={
-            loadErr ? "" :
-            isNewFile ? "New file. Start typing — it will be saved automatically." :
-            "Edit markdown here. Switch to preview to see it rendered."
-          }
+          className="flex-1 resize-none bg-zinc-950 px-4 py-3 font-mono text-xs text-zinc-200 outline-none"
+          placeholder={isNewFile ? "New file. Start typing…" : "Edit and the agent will pick it up next turn."}
         />
       )}
     </div>

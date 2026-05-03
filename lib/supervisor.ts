@@ -560,7 +560,7 @@ function scheduleRestart(la: LiveAgent, atMs: number): void {
 function readSessionMarker(filePath: string): string | null {
   try {
     const slice = readFileSync(filePath, "utf8").slice(0, 4096);
-    const m = slice.match(new RegExp(SESSION_MARKER_PREFIX + "([\w-]+)"));
+    const m = slice.match(new RegExp(SESSION_MARKER_PREFIX + "([\\w-]+)"));
     return m ? m[1] : null;
   } catch {
     return null;

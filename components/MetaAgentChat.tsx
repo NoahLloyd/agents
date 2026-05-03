@@ -146,6 +146,24 @@ export default function MetaAgentChat({ onClose }: Props) {
     } catch {}
   }, [sessionId]);
 
+  // Keep current conversation up-to-date in the saved history list
+  // so it appears there immediately and is not lost on close.
+  useEffect(() => {
+    if (entries.length === 0 || !sessionId) return;
+    setConversations((prev) => {
+      const conv: SavedConversation = {
+        sessionId,
+        title: conversationTitle(entries),
+        timestamp: Date.now(),
+        entries,
+      };
+      const filtered = prev.filter((c) => c.sessionId !== sessionId);
+      const next = [conv, ...filtered].slice(0, MAX_SAVED);
+      saveConversations(next);
+      return next;
+    });
+  }, [entries, sessionId]);
+
   const setStuck = (v: boolean) => {
     if (stuckRef.current !== v) {
       stuckRef.current = v;

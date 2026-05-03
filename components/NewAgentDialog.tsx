@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useEscapeToClose } from "@/lib/use-escape";
 import FileInput from "@/components/FileInput";
 import type { Agent } from "@/lib/types";
 import { api } from "@/lib/api";
@@ -21,12 +22,14 @@ export default function NewAgentDialog({
   const [filePath, setFilePath] = useState(DEFAULT_NOTES_FILE);
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState("claude-opus-4-7");
-  const [fallbackModel, setFallbackModel] = useState("claude-opus-4-6");
+  const [fallbackModel, setFallbackModel] = useState("claude-sonnet-4-6");
   const [effort, setEffort] = useState<Agent["effort"]>("max");
   const [keepAlive, setKeepAlive] = useState(true);
   const [startNow, setStartNow] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  useEscapeToClose(onClose);
 
   const submit = async () => {
     setErr(null);
@@ -252,6 +255,7 @@ function DirInput({ value, onChange }: { value: string; onChange: (v: string) =>
             e.preventDefault();
             pick(suggestions[activeIdx]);
           } else if (e.key === "Escape") {
+            e.preventDefault();
             setOpen(false);
           } else if (e.key === "Tab" && suggestions.length > 0) {
             e.preventDefault();

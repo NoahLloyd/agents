@@ -325,7 +325,7 @@ const EXECUTORS: Record<string, ToolExecutor> = {
       workingDir: String(input.workingDir),
       direction: direction as Agent["direction"],
       model: input.model ? String(input.model) : "claude-opus-4-7",
-      fallbackModel: "claude-opus-4-6",
+      fallbackModel: "claude-sonnet-4-6",
       effort: (input.effort as Agent["effort"]) ?? "max",
       enabled: input.enabled === undefined ? true : Boolean(input.enabled),
       keepAlive: input.keepAlive === undefined ? true : Boolean(input.keepAlive),
