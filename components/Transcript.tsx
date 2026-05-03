@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Settings } from "lucide-react";
+import { MessageSquare, Settings } from "lucide-react";
 import type { Agent, AgentRuntime, TranscriptEvent } from "@/lib/types";
 import {
   AssistantText,
@@ -160,11 +160,13 @@ export default function Transcript({
   agent,
   runtime,
   onOpenSettings,
+  onOpenChat,
 }: {
   events: TranscriptEvent[];
   agent: Agent | null;
   runtime: AgentRuntime | null;
   onOpenSettings?: () => void;
+  onOpenChat?: () => void;
 }) {
   const running = runtime?.alive ?? false;
   const uptimeSec = runtime?.uptimeSec ?? null;
@@ -281,10 +283,19 @@ export default function Transcript({
             {sessionShort}
           </span>
         )}
+        {agent && onOpenChat && (
+          <button
+            onClick={onOpenChat}
+            className={`shrink-0 rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-emerald-400 ${!sessionShort && !onOpenSettings ? "ml-auto" : ""}`}
+            title="Chat about this agent"
+          >
+            <MessageSquare size={13} strokeWidth={2} />
+          </button>
+        )}
         {agent && onOpenSettings && (
           <button
             onClick={onOpenSettings}
-            className={`shrink-0 rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 ${sessionShort ? "" : "ml-auto"}`}
+            className={`shrink-0 rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 ${sessionShort || onOpenChat ? "" : "ml-auto"}`}
             title="Agent settings"
           >
             <Settings size={13} strokeWidth={2} />

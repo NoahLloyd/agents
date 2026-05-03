@@ -1,6 +1,6 @@
 "use client";
 
-import { FileText } from "lucide-react";
+import { FileText, MessageSquare } from "lucide-react";
 
 export type Tab =
   | { id: string; kind: "agent"; agentId: string; label: string }
@@ -11,7 +11,8 @@ export type Tab =
       hash: string;
       filePath: string | null;
       label: string;
-    };
+    }
+  | { id: string; kind: "chat"; agentId: string; label: string };
 
 export default function TabBar({
   tabs,
@@ -44,7 +45,7 @@ export default function TabBar({
                 : "text-zinc-500 hover:bg-zinc-900/50 hover:text-zinc-300"
             }`}
           >
-            <TabIcon kind={t.kind} />
+            <TabIcon tab={t} />
             <span className="max-w-[180px] truncate" title={t.label}>
               {t.label}
             </span>
@@ -70,9 +71,12 @@ export default function TabBar({
   );
 }
 
-function TabIcon({ kind }: { kind: Tab["kind"] }) {
-  if (kind === "file") {
+function TabIcon({ tab }: { tab: Tab }) {
+  if (tab.kind === "file") {
     return <FileText size={11} className="shrink-0 text-zinc-500" />;
+  }
+  if (tab.kind === "chat") {
+    return <MessageSquare size={11} className="shrink-0 text-emerald-600" />;
   }
   return null;
 }

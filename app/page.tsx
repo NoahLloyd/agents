@@ -11,6 +11,7 @@ import TabBar, { type Tab } from "@/components/TabBar";
 import FileViewer from "@/components/FileViewer";
 import SettingsPage from "@/components/SettingsPage";
 import AgentSettingsModal from "@/components/AgentSettingsModal";
+import AgentChat from "@/components/AgentChat";
 import { useWs } from "@/lib/use-ws";
 import { api, WS_URL } from "@/lib/api";
 import type {
@@ -36,7 +37,8 @@ type TabState =
       workingDir: string;
       hash: string;
       filePath: string | null;
-    };
+    }
+  | { id: string; kind: "chat"; agentId: string };
 
 function uid(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -231,6 +233,15 @@ export default function Home() {
             label: a?.name ?? "(removed)",
           };
         }
+        if (t.kind === "chat") {
+          const a = agents.find((x) => x.agent.id === t.agentId)?.agent;
+          return {
+            id: t.id,
+            kind: "chat",
+            agentId: t.agentId,
+            label: a?.name ?? "(removed)",
+          };
+        }
         const name =
           t.filePath?.split("/").pop() ??
           (t.hash === "WORKING" ? "working tree" : t.hash.slice(0, 7));
@@ -289,6 +300,17 @@ export default function Home() {
   const onSidebarOpenInNewTab = (agentId: string) => {
     setSelectedId(agentId);
     const t: TabState = { id: uid(), kind: "agent", agentId };
+    setTabs((prev) => [...prev, t]);
+    setActiveTabId(t.id);
+  };
+
+  const onOpenChat = (agentId: string) => {
+    const existing = tabs.find((t) => t.kind === "chat" && t.agentId === agentId);
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    const t: TabState = { id: uid(), kind: "chat", agentId };
     setTabs((prev) => [...prev, t]);
     setActiveTabId(t.id);
   };
@@ -516,7 +538,24 @@ export default function Home() {
                   activeTab.kind === 'agent' &&
                   setAgentSettingsId(activeTab.agentId)
                 }
+                onOpenChat={() =>
+                  activeTab.kind === 'agent' &&
+                  onOpenChat(activeTab.agentId)
+                }
               />
+            ) : activeTab?.kind === 'chat' ? (
+              (() => {
+                const chatAgent = agents.find((a) => activeTab.kind === 'chat' && a.agent.id === activeTab.agentId)?.agent ?? null;
+                return chatAgent ? (
+                  <AgentChat
+                    agentId={chatAgent.id}
+                    agentName={chatAgent.name}
+                    workingDir={chatAgent.workingDir}
+                  />
+                ) : (
+                  <div className="flex h-full items-center justify-center text-sm italic text-zinc-600">agent not found</div>
+                );
+              })()
             ) : activeTab?.kind === 'file' ? (
               <FileViewer
                 workingDir={activeTab.workingDir}
