@@ -1,5 +1,9 @@
 "use client";
 
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
+
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
@@ -358,6 +362,8 @@ function PinSearch({
   );
 }
 
+const IS_MD = (p: string) => /\.(md|mdx|markdown)$/i.test(p);
+
 function NoteEditor({ pin }: { pin: Pin }) {
   const [content, setContent] = useState<string>("");
   const [savedContent, setSavedContent] = useState<string>("");
@@ -365,7 +371,10 @@ function NoteEditor({ pin }: { pin: Pin }) {
   const [saving, setSaving] = useState(false);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [isNewFile, setIsNewFile] = useState(false);
+  // Default to preview for existing markdown files, edit for new/text files
+  const [mode, setMode] = useState<"preview" | "edit">(IS_MD(pin.path) ? "preview" : "edit");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     setLoadErr(null);
@@ -375,7 +384,11 @@ function NoteEditor({ pin }: { pin: Pin }) {
       .then((r) => {
         setContent(r.content);
         setSavedContent(r.content);
-        if ((r as { new?: boolean }).new) setIsNewFile(true);
+        const isNew = !!(r as { new?: boolean }).new;
+        setIsNewFile(isNew);
+        // Jump to edit mode for new files so user can start typing immediately
+        if (isNew) setMode("edit");
+        else setMode(IS_MD(pin.path) ? "preview" : "edit");
       })
       .catch((e) => setLoadErr((e as Error).message));
   }, [pin.path]);
@@ -397,12 +410,8 @@ function NoteEditor({ pin }: { pin: Pin }) {
   useEffect(() => {
     if (!dirty) return;
     if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => {
-      void save(content);
-    }, AUTOSAVE_DELAY_MS);
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
+    timerRef.current = setTimeout(() => void save(content), AUTOSAVE_DELAY_MS);
+    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
   }, [content, dirty]);
 
   useEffect(() => {
@@ -410,9 +419,7 @@ function NoteEditor({ pin }: { pin: Pin }) {
       if (dirty) {
         navigator.sendBeacon(
           "/api/file",
-          new Blob([JSON.stringify({ path: pin.path, content })], {
-            type: "application/json",
-          }),
+          new Blob([JSON.stringify({ path: pin.path, content })], { type: "application/json" }),
         );
       }
     };
@@ -424,46 +431,79 @@ function NoteEditor({ pin }: { pin: Pin }) {
     };
   }, [content, dirty, pin.path]);
 
+  // Focus textarea when switching to edit mode
+  useEffect(() => {
+    if (mode === "edit") textareaRef.current?.focus();
+  }, [mode]);
+
   let statusLabel: string;
   let statusClass = "text-zinc-600";
-  if (loadErr) {
-    statusLabel = `error: ${loadErr}`;
-    statusClass = "text-red-400";
-  } else if (saving) {
-    statusLabel = "saving…";
-    statusClass = "text-zinc-400";
-  } else if (dirty) {
-    statusLabel = "unsaved (autosaving)";
-    statusClass = "text-amber-400";
-  } else if (isNewFile && savedAt === null) {
-    statusLabel = "new file — start typing to create";
-    statusClass = "text-emerald-600";
-  } else if (savedAt) {
-    statusLabel = `saved ${new Date(savedAt).toLocaleTimeString(undefined, { hour12: false })}`;
-  } else {
-    statusLabel = "loaded";
-  }
+  if (loadErr) { statusLabel = `error: ${loadErr}`; statusClass = "text-red-400"; }
+  else if (saving) { statusLabel = "saving…"; statusClass = "text-zinc-400"; }
+  else if (dirty) { statusLabel = "unsaved"; statusClass = "text-amber-400"; }
+  else if (isNewFile && savedAt === null) { statusLabel = "new file"; statusClass = "text-emerald-600"; }
+  else if (savedAt) { statusLabel = `saved ${new Date(savedAt).toLocaleTimeString(undefined, { hour12: false })}`; }
+  else { statusLabel = "loaded"; }
+
+  const isMd = IS_MD(pin.path);
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-1 text-[10px]">
-        <span className="truncate font-mono text-zinc-600">{pin.path}</span>
-        <span className={statusClass}>{statusLabel}</span>
+      {/* Header bar */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-zinc-800 px-3 py-1 text-[10px]">
+        <span className="min-w-0 flex-1 truncate font-mono text-zinc-600">{pin.path}</span>
+        <span className={`shrink-0 ${statusClass}`}>{statusLabel}</span>
+        {isMd && !loadErr && (
+          <div className="flex shrink-0 items-center rounded border border-zinc-800 text-[10px]">
+            <button
+              onClick={() => setMode("preview")}
+              className={`px-2 py-0.5 transition ${mode === "preview" ? "bg-zinc-800 text-zinc-200" : "text-zinc-600 hover:text-zinc-400"}`}
+            >
+              preview
+            </button>
+            <button
+              onClick={() => setMode("edit")}
+              className={`px-2 py-0.5 transition ${mode === "edit" ? "bg-zinc-800 text-zinc-200" : "text-zinc-600 hover:text-zinc-400"}`}
+            >
+              edit
+            </button>
+          </div>
+        )}
       </div>
-      <textarea
-        value={content}
-        onChange={(e) => setContent(e.target.value)}
-        spellCheck={false}
-        disabled={!!loadErr}
-        className="flex-1 resize-none bg-zinc-950 px-4 py-3 font-mono text-xs text-zinc-200 outline-none disabled:opacity-50"
-        placeholder={
-          loadErr
-            ? ""
-            : isNewFile
-            ? "New file. Start typing — it will be saved automatically."
-            : "Edit and the agent will pick it up next turn."
-        }
-      />
+
+      {/* Content area */}
+      {mode === "preview" && isMd ? (
+        <div
+          className="md-preview prose prose-sm prose-invert flex-1 overflow-auto px-6 py-4 max-w-none"
+          onClick={() => setMode("edit")}
+          title="Click to edit"
+        >
+          {content.trim() ? (
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              rehypePlugins={[rehypeHighlight]}
+            >
+              {content}
+            </ReactMarkdown>
+          ) : (
+            <p className="italic text-zinc-600">Empty file — click to edit.</p>
+          )}
+        </div>
+      ) : (
+        <textarea
+          ref={textareaRef}
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          spellCheck={false}
+          disabled={!!loadErr}
+          className="flex-1 resize-none bg-zinc-950 px-4 py-3 font-mono text-xs text-zinc-200 outline-none disabled:opacity-50"
+          placeholder={
+            loadErr ? "" :
+            isNewFile ? "New file. Start typing — it will be saved automatically." :
+            "Edit markdown here. Switch to preview to see it rendered."
+          }
+        />
+      )}
     </div>
   );
 }
