@@ -1,5 +1,6 @@
 "use client";
 
+import { X } from "lucide-react";
 import { useEffect } from "react";
 import type { Agent, AgentRuntime } from "@/lib/types";
 import SettingsPanel from "./SettingsPanel";
@@ -39,7 +40,7 @@ export default function AgentSettingsModal({
             className="text-zinc-500 hover:text-zinc-200"
             title="Close (Esc)"
           >
-            ✕
+            <X size={14} strokeWidth={2} />
           </button>
         </div>
         <div className="min-h-0 flex-1">

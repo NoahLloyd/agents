@@ -7,10 +7,13 @@ export const runtime = "nodejs";
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 
+type ImageInput = { mimeType: string; base64: string };
+
 type ChatRequest = {
   workingDir: string;
   message: string;
   sessionId?: string | null;
+  images?: ImageInput[];
 };
 
 function sse(data: unknown): string {
@@ -25,8 +28,9 @@ export async function POST(req: Request) {
   const body = (await req.json()) as ChatRequest;
   const message = (body.message ?? "").trim();
   const workingDir = (body.workingDir ?? "").trim();
+  const images = body.images ?? [];
 
-  if (!message) return new Response("message required", { status: 400 });
+  if (!message && images.length === 0) return new Response("message required", { status: 400 });
   if (!workingDir) return new Response("workingDir required", { status: 400 });
   if (!isPathAllowed(workingDir)) return new Response("path not allowed", { status: 403 });
 
@@ -41,19 +45,26 @@ export async function POST(req: Request) {
   delete cleanEnv.ANTHROPIC_AUTH_TOKEN;
   delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN;
 
+  const hasImages = images.length > 0;
+
   const args = [
     "--dangerously-skip-permissions",
     "--add-dir", workingDir,
     "--append-system-prompt", systemPrompt,
     "--output-format", "stream-json",
-    "--input-format", "text",
+    "--input-format", hasImages ? "json" : "text",
     "--include-partial-messages",
     "--verbose",
     "--model", "claude-sonnet-4-6",
     "--fallback-model", "claude-haiku-4-5",
     "--effort", "medium",
-    "-p", message,
   ];
+
+  // For text-only, use -p flag. For images, pipe JSON to stdin.
+  if (!hasImages) {
+    args.push("-p", message);
+  }
+
   if (existingSession) args.push("--resume", sessionId);
   else args.push("--session-id", sessionId);
 
@@ -72,8 +83,22 @@ export async function POST(req: Request) {
       const child = spawn(CLAUDE_BIN, args, {
         cwd: workingDir,
         env: cleanEnv as unknown as NodeJS.ProcessEnv,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
       });
+
+      // If images present, write JSON content blocks to stdin then close
+      if (hasImages) {
+        const contentBlocks: unknown[] = images.map((img) => ({
+          type: "image",
+          source: { type: "base64", media_type: img.mimeType, data: img.base64 },
+        }));
+        if (message) contentBlocks.push({ type: "text", text: message });
+        const jsonInput = JSON.stringify(contentBlocks);
+        child.stdin?.write(jsonInput);
+        child.stdin?.end();
+      } else {
+        child.stdin?.end();
+      }
 
       req.signal.addEventListener("abort", () => { try { child.kill("SIGTERM"); } catch {} });
 
@@ -155,9 +180,14 @@ export async function POST(req: Request) {
       child.on("error", (e) => { send({ type: "error", message: `spawn error: ${e.message}` }); });
       child.on("close", (code, signal) => {
         if (stdoutBuf.trim()) handleJsonLine(stdoutBuf.trim());
+        const isSigterm = signal === "SIGTERM" || code === 143;
         if (code !== 0) {
-          const tail = stderrBuf.slice(-800);
-          send({ type: "error", message: `claude exited with code=${code} signal=${signal ?? ""}${tail ? `\n${tail}` : ""}` });
+          if (isSigterm) {
+            send({ type: "service_restart" });
+          } else {
+            const tail = stderrBuf.slice(-800);
+            send({ type: "error", message: `claude exited with code=${code} signal=${signal ?? ""}${tail ? `\n${tail}` : ""}` });
+          }
         }
         send({ type: "done" });
         if (!closed) { closed = true; try { controller.close(); } catch {} }

@@ -1,5 +1,6 @@
 "use client";
 
+import { X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useEscapeToClose } from "@/lib/use-escape";
 import FileInput from "@/components/FileInput";
@@ -12,12 +13,14 @@ const DEFAULT_NOTES_FILE = "/home/noah/AI-safety/Noah's notes.md";
 export default function NewAgentDialog({
   onClose,
   onCreated,
+  lockedWorkingDir,
 }: {
   onClose: () => void;
   onCreated: (agent: Agent) => void;
+  lockedWorkingDir?: string;
 }) {
   const [name, setName] = useState("");
-  const [workingDir, setWorkingDir] = useState(DEFAULT_WORKING_DIR);
+  const [workingDir, setWorkingDir] = useState(lockedWorkingDir ?? DEFAULT_WORKING_DIR);
   const [mode, setMode] = useState<"file" | "inline">("inline");
   const [filePath, setFilePath] = useState(DEFAULT_NOTES_FILE);
   const [prompt, setPrompt] = useState("");
@@ -73,7 +76,7 @@ export default function NewAgentDialog({
         <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
           <h2 className="text-sm font-medium text-zinc-200">new agent</h2>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200">
-            ✕
+            <X size={14} strokeWidth={2} />
           </button>
         </div>
 
@@ -88,7 +91,13 @@ export default function NewAgentDialog({
           </Field>
 
           <Field label="working dir">
-            <DirInput value={workingDir} onChange={setWorkingDir} />
+            {lockedWorkingDir ? (
+              <div className="rounded border border-zinc-800 bg-zinc-900/50 px-2 py-1 font-mono text-xs text-zinc-400 select-none">
+                {lockedWorkingDir}
+              </div>
+            ) : (
+              <DirInput value={workingDir} onChange={setWorkingDir} />
+            )}
           </Field>
 
           <Field label="direction">

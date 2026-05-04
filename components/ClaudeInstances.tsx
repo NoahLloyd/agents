@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronRight } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 
@@ -69,7 +70,7 @@ export default function ClaudeInstances() {
             open ? "rotate-90" : ""
           }`}
         >
-          ▸
+          <ChevronRight size={13} strokeWidth={2} />
         </span>
         <span className="flex-1">
           other claude procs

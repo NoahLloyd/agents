@@ -1,15 +1,15 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { MessageSquare, Settings } from "lucide-react";
+import { MessageSquare, Play, Settings } from "lucide-react";
 import type { Agent, AgentRuntime, TranscriptEvent } from "@/lib/types";
 import {
   AssistantText,
   LiveDots,
   ThinkingRow,
   ToolRow,
-  UserBubble,
 } from "./ChatPieces";
+import { api } from "@/lib/api";
 
 type Turn =
   | { kind: "direction"; text: string; fileMode: boolean }
@@ -256,7 +256,7 @@ export default function Transcript({
 
   return (
     <div className="relative flex h-full flex-col bg-zinc-950">
-      <div className="flex h-9 shrink-0 items-center gap-3 border-b border-zinc-800 px-4 text-[11px]">
+      <div className="flex h-10 shrink-0 items-center gap-3 border-b border-zinc-800 px-4 text-sm">
         <span
           className={`shrink-0 font-medium ${statusInfo.labelClass} ${
             running ? "animate-pulse" : ""
@@ -314,12 +314,14 @@ export default function Transcript({
               select an agent on the left
             </div>
           )}
-          {agent && turns.length === 0 && (
-            <div className="text-sm italic text-zinc-600">
-              waiting for events…
-            </div>
+          {agent && !running && events.length === 0 && (
+            <AgentIdleView
+              agent={agent}
+              runtime={runtime}
+              onOpenSettings={onOpenSettings}
+            />
           )}
-          {turns.map((t, idx) => (
+          {agent && (running || events.length > 0) && turns.map((t, idx) => (
             <TurnView key={"key" in t ? t.key : `dir-${idx}`} turn={t} />
           ))}
         </div>
@@ -334,7 +336,7 @@ export default function Transcript({
         </button>
       )}
 
-      <div className="flex h-6 items-center gap-3 border-t border-zinc-800 px-4 font-mono text-[10px] text-zinc-600">
+      <div className="flex h-6 items-center gap-3 border-t border-zinc-800 px-4 font-mono text-xs text-zinc-600">
         <span>{events.length} evt</span>
         <span>
           {counts.tools} tool{counts.tools === 1 ? "" : "s"}
@@ -346,6 +348,89 @@ export default function Transcript({
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+
+function AgentIdleView({
+  agent,
+  runtime,
+  onOpenSettings,
+}: {
+  agent: Agent;
+  runtime: AgentRuntime | null;
+  onOpenSettings?: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const scheduled = runtime?.scheduledRestartAt ?? null;
+  const lastExit = runtime?.lastExit ?? null;
+
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try { await fn(); } finally { setBusy(false); }
+  };
+
+  function fmtAgo(ts: number): string {
+    const sec = Math.floor((Date.now() - ts) / 1000);
+    if (sec < 60) return `${sec}s ago`;
+    const m = Math.floor(sec / 60);
+    if (m < 60) return `${m}m ago`;
+    return `${Math.floor(m / 60)}h${m % 60}m ago`;
+  }
+
+  const dirPreview = agent.direction.kind === "file"
+    ? agent.direction.filePath.split("/").slice(-2).join("/")
+    : agent.direction.prompt.slice(0, 120) + (agent.direction.prompt.length > 120 ? "…" : "");
+
+  // 143 = 128+15 (SIGTERM), 137 = 128+9 (SIGKILL) — both are intentional stops, not crashes
+  const isErrorExit = lastExit?.code != null && lastExit.code !== 0 && lastExit.code !== 143 && lastExit.code !== 137;
+
+  return (
+    <div className="flex flex-col items-center gap-8 py-12">
+      {/* Status */}
+      <div className="flex items-center gap-2 text-sm">
+        <span className={`h-2 w-2 shrink-0 rounded-full ${scheduled ? "bg-amber-400 animate-pulse" : "bg-zinc-600"}`} />
+        <span className={`${scheduled ? "text-amber-300" : "text-zinc-500"}`}>
+          {scheduled ? `auto-starting in ${fmtCountdown(scheduled)}` : "stopped"}
+        </span>
+        {lastExit && (
+          <span className="text-xs text-zinc-600">
+            · last run {fmtAgo(lastExit.ts)}
+            {isErrorExit && (
+              <span className="ml-1 text-red-500">exit {lastExit.code}</span>
+            )}
+          </span>
+        )}
+      </div>
+
+      {/* Big start button */}
+      {!scheduled && (
+        <button
+          disabled={busy}
+          onClick={() => void act(() => api.start(agent.id))}
+          className="group relative flex items-center gap-3 rounded-xl bg-emerald-600 px-10 py-4 text-base font-semibold text-white shadow-lg shadow-emerald-900/40 transition hover:bg-emerald-500 hover:shadow-emerald-800/50 disabled:opacity-50"
+        >
+          <Play size={18} strokeWidth={2} />
+          Start
+        </button>
+      )}
+
+      {/* Direction card — entire card opens settings */}
+      <button
+        onClick={onOpenSettings}
+        disabled={!onOpenSettings}
+        className="w-full rounded-xl border border-zinc-800 bg-zinc-900/50 p-5 text-left transition hover:border-zinc-700 hover:bg-zinc-900 disabled:cursor-default"
+      >
+        <div className="mb-2 text-xs uppercase tracking-widest text-zinc-500">
+          {agent.direction.kind === "file" ? "direction file" : "direction"}
+        </div>
+        {agent.direction.kind === "file" ? (
+          <code className="block truncate font-mono text-sm text-zinc-300">{dirPreview}</code>
+        ) : (
+          <p className="line-clamp-4 whitespace-pre-wrap text-sm leading-relaxed text-zinc-300">{dirPreview}</p>
+        )}
+      </button>
     </div>
   );
 }
@@ -413,7 +498,7 @@ function TimeMarker({
     gapSec !== null && gapSec >= TIME_MARKER_INTERVAL_SEC * 1.5;
   return (
     <div
-      className="flex items-center gap-3 py-1 text-[10px] font-mono text-zinc-600 select-none"
+      className="flex items-center gap-3 py-1 text-xs font-mono text-zinc-600 select-none"
       aria-hidden
     >
       <span className="h-px flex-1 bg-zinc-800" />
@@ -433,13 +518,15 @@ function TimeMarker({
 
 function DirectionBubble({ text, fileMode }: { text: string; fileMode: boolean }) {
   return (
-    <UserBubble>
-      {fileMode && (
-        <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
-          reading file each turn
-        </div>
-      )}
-      {fileMode ? <code className="font-mono">{text}</code> : text}
-    </UserBubble>
+    <div className="flex justify-end">
+      <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-zinc-800 px-3.5 py-2 text-sm leading-relaxed text-zinc-100">
+        {fileMode && (
+          <div className="mb-1 text-xs uppercase tracking-wider text-zinc-500">
+            reading file each turn
+          </div>
+        )}
+        {fileMode ? <code className="font-mono">{text}</code> : text}
+      </div>
+    </div>
   );
 }

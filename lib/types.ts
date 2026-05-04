@@ -72,6 +72,13 @@ export type AutoCommitInfo = {
   ts: number;
 };
 
+export type ChatSession = {
+  id: string;
+  name: string;
+  workingDir: string;
+  createdAt: number;
+};
+
 export type WsMessage =
   | { type: "transcript"; agentId: string; event: TranscriptEvent }
   | { type: "file"; agentId: string | null; change: FileChange }
@@ -79,4 +86,15 @@ export type WsMessage =
   | { type: "agent_removed"; agentId: string }
   | { type: "agents_snapshot"; agents: { agent: Agent; runtime: AgentRuntime }[] }
   | { type: "auto_commit"; info: AutoCommitInfo }
-  | { type: "session_reset"; agentId: string };
+  | { type: "session_reset"; agentId: string }
+  | { type: "projects_snapshot"; projects: Project[] }
+  | { type: "project_removed"; projectId: string }
+  | { type: "chats_snapshot"; chats: ChatSession[] }
+  | { type: "chat_removed"; chatId: string };
+
+export type Project = {
+  id: string;
+  name: string;
+  workingDir: string;
+  createdAt: number;
+};

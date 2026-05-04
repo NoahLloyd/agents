@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 type Entry = { path: string; isDir: boolean };
@@ -109,7 +110,7 @@ export default function FileInput({
               }`}
             >
               <span className={entry.isDir ? "text-zinc-500" : "text-zinc-600"}>
-                {entry.isDir ? "▸" : "·"}
+                {entry.isDir ? <ChevronRight size={11} strokeWidth={2} /> : <span className="w-[11px] text-center">·</span>}
               </span>
               <span className="truncate">{entry.path}</span>
             </li>

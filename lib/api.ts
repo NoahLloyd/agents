@@ -81,4 +81,26 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ path: p, content }),
     }),
+  projects: {
+    list: () =>
+      jfetch<{ projects: import("./types").Project[] }>(`${WS_HTTP}/projects`),
+    create: (body: { name: string; workingDir: string }) =>
+      jfetch<{ project: import("./types").Project }>(`${WS_HTTP}/projects`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    remove: (id: string) =>
+      jfetch<{ ok: boolean }>(`${WS_HTTP}/projects/${id}`, { method: "DELETE" }),
+  },
+  chats: {
+    list: () =>
+      jfetch<{ chats: import("./types").ChatSession[] }>(`${WS_HTTP}/chats`),
+    create: (body: { name: string; workingDir: string }) =>
+      jfetch<{ chat: import("./types").ChatSession }>(`${WS_HTTP}/chats`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    remove: (id: string) =>
+      jfetch<{ ok: boolean }>(`${WS_HTTP}/chats/${id}`, { method: "DELETE" }),
+  },
 };

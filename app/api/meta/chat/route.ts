@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
@@ -9,7 +9,13 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 const BUN_BIN = process.env.BUN_BIN ?? "bun";
 const HOME = process.env.HOME ?? "/root";
 const PROJECT_ROOT = process.cwd();
+
 const MCP_SCRIPT = path.join(PROJECT_ROOT, "mcp-houston.ts");
+
+// Tracks in-progress Claude processes keyed by sessionId.
+// If a new request arrives for the same session, the old child is killed first
+// to avoid two processes writing to the same session file.
+const activeChildren = new Map<string, ChildProcess>();
 
 const SYSTEM_PROMPT = `You are the Houston meta-agent — an assistant embedded in a dashboard that runs many Claude Code agents in parallel.
 
@@ -117,6 +123,13 @@ export async function POST(req: Request) {
       const spawnEnv = {
         ...cleanEnv,
       };
+      // Kill any in-progress child for this session before starting a new one.
+      const existingChild = activeChildren.get(sessionId);
+      if (existingChild) {
+        try { existingChild.kill('SIGTERM'); } catch {}
+        activeChildren.delete(sessionId);
+      }
+
       console.log(`[meta] spawning claude for session ${sessionId}`);
       const child = spawn(CLAUDE_BIN, args, {
         cwd: PROJECT_ROOT,
@@ -124,11 +137,14 @@ export async function POST(req: Request) {
         stdio: ["ignore", "pipe", "pipe"],
       });
 
-      // Abort child if client disconnects.
+      activeChildren.set(sessionId, child);
+
+      // When client disconnects, just close the SSE — don't kill Claude.
+      // The process keeps running so the turn completes; a new request with the
+      // same sessionId will kill it before spawning a replacement (see above).
       req.signal.addEventListener("abort", () => {
-        try {
-          child.kill("SIGTERM");
-        } catch {}
+        closed = true;
+        try { controller.close(); } catch {}
       });
 
       let stdoutBuf = "";
@@ -288,8 +304,9 @@ export async function POST(req: Request) {
       });
 
       child.on("close", (code, signal) => {
+        activeChildren.delete(sessionId);
         if (stdoutBuf.trim()) handleJsonLine(stdoutBuf.trim());
-        if (code !== 0) {
+        if (code !== 0 && signal !== "SIGTERM" && code !== 143) {
           const tail = stderrBuf.slice(-800);
           send({
             type: "error",

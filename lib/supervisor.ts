@@ -589,20 +589,19 @@ async function attributeNewestSession(la: LiveAgent): Promise<void> {
     try {
       const s = statSync(full);
       if (la.usedSessionPaths.has(full)) continue;
-      // If another agent already claimed this file, skip — unless we can
-      // prove via marker that it's actually ours.
+      // Time window comes first — old sessions (even ones with our marker)
+      // must not be picked up after a restart.
+      const born = s.birthtimeMs || s.ctimeMs;
+      const diff = born - spawnedAt;
+      if (diff < -5_000 || diff > 30_000) continue;
+      // Within the window, prefer a file that carries our agent marker.
       const marker = readSessionMarker(full);
       if (marker && marker !== la.agent.id) continue; // belongs to a sibling
       if (!marker && sessionAlreadyAttributed(full, la.agent.id)) continue;
       if (marker === la.agent.id) {
-        // Definitive match — prefer over time-based candidates.
         markerMatch = full;
         break;
       }
-      // Fallback: time-proximity for sessions without a marker yet.
-      const born = s.birthtimeMs || s.ctimeMs;
-      const diff = born - spawnedAt;
-      if (diff < -5_000 || diff > 30_000) continue;
       if (!timeBest || Math.abs(diff) < Math.abs(timeBest.diff)) {
         timeBest = { path: full, diff };
       }
@@ -747,6 +746,7 @@ export function startAgent(agentId: string): boolean {
   if (la.runtime.alive) return true;
   la.agent.enabled = true;
   persistAgent(la.agent);
+  broadcastFn({ type: "session_reset", agentId: la.agent.id });
   spawnAgent(la);
   return true;
 }
@@ -771,6 +771,7 @@ export function stopAgent(agentId: string): boolean {
       } catch {}
     }
   }
+  broadcastFn({ type: "session_reset", agentId: la.agent.id });
   broadcastAgent(la);
   return true;
 }

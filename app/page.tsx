@@ -6,11 +6,11 @@ import FileActivity from "@/components/FileActivity";
 import PinnedNotes from "@/components/PinnedNotes";
 import AgentSidebar from "@/components/AgentSidebar";
 import NewAgentDialog from "@/components/NewAgentDialog";
+import NewProjectDialog from "@/components/NewProjectDialog";
 import MetaAgentChat from "@/components/MetaAgentChat";
 import TabBar, { type Tab } from "@/components/TabBar";
 import FileViewer from "@/components/FileViewer";
 import SettingsPage from "@/components/SettingsPage";
-import AgentSettingsModal from "@/components/AgentSettingsModal";
 import AgentChat from "@/components/AgentChat";
 import { useWs } from "@/lib/use-ws";
 import { api, WS_URL } from "@/lib/api";
@@ -18,74 +18,115 @@ import type {
   Agent,
   AgentRuntime,
   AutoCommitInfo,
+  ChatSession,
   TranscriptEvent,
   FileChange,
+  Project,
   WsMessage,
 } from "@/lib/types";
 
 const FILE_TTL_MS = 60_000;
 const SELECTED_KEY = "agents.selectedId.v1";
 const META_OPEN_KEY = "meta-agent.open.v1";
+const NOTES_COLLAPSED_KEY = "agents.notesCollapsed.v1";
+const ACTIVITY_COLLAPSED_KEY = "agents.activityCollapsed.v1";
 
 type AgentEntry = { agent: Agent; runtime: AgentRuntime };
 
-type TabState =
-  | { id: string; kind: "agent"; agentId: string }
-  | {
-      id: string;
-      kind: "file";
-      workingDir: string;
-      hash: string;
-      filePath: string | null;
-    }
-  | { id: string; kind: "chat"; agentId: string };
+type MainView =
+  | { kind: "agent"; agentId: string }
+  | { kind: "chat"; chatId: string; workingDir: string; displayName: string };
+
+type FileTab = {
+  id: string;
+  workingDir: string;
+  hash: string;
+  filePath: string | null;
+};
 
 function uid(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
+const SHORTCUTS = [
+  { key: "?",           desc: "Show shortcuts" },
+  { key: "⌘K / Ctrl+K", desc: "Toggle Meta agent" },
+  { key: "Esc",         desc: "Close panel / dialog" },
+  { key: "⌘W / Ctrl+W", desc: "Close active file tab" },
+];
+
 export default function Home() {
+  const [projects, setProjects] = useState<Project[]>([]);
   const [agents, setAgents] = useState<AgentEntry[]>([]);
+  const [chats, setChats] = useState<ChatSession[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [mainView, setMainView] = useState<MainView | null>(null);
+  const [fileTabs, setFileTabs] = useState<FileTab[]>([]);
+  const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [eventsByAgent, setEventsByAgent] = useState<Record<string, TranscriptEvent[]>>({});
   const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
-  const [showNew, setShowNew] = useState(false);
+  const [showNewAgent, setShowNewAgent] = useState(false);
+  const [newAgentWorkingDir, setNewAgentWorkingDir] = useState<string | undefined>(undefined);
+  const [showNewProject, setShowNewProject] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
   const [metaOpen, setMetaOpen] = useState(false);
-  const [tabs, setTabs] = useState<TabState[]>([]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [commitByDir, setCommitByDir] = useState<Record<string, AutoCommitInfo>>({});
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
-  const [agentSettingsId, setAgentSettingsId] = useState<string | null>(null);
   const [, setTick] = useState(0);
+  const [streamingChat, setStreamingChat] = useState(false);
+  const [notesCollapsed, setNotesCollapsed] = useState(false);
+  const [activityCollapsed, setActivityCollapsed] = useState(false);
 
-  // Load + persist meta-agent open state.
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(META_OPEN_KEY);
-      if (saved === "1") setMetaOpen(true);
-    } catch {}
+    try { if (localStorage.getItem(META_OPEN_KEY) === "1") setMetaOpen(true); } catch {}
   }, []);
   useEffect(() => {
-    try {
-      localStorage.setItem(META_OPEN_KEY, metaOpen ? "1" : "0");
-    } catch {}
+    try { localStorage.setItem(META_OPEN_KEY, metaOpen ? "1" : "0"); } catch {}
   }, [metaOpen]);
 
-  // Keyboard shortcut: Cmd/Ctrl+K toggles the meta-agent; Esc closes it.
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(NOTES_COLLAPSED_KEY) === "1") setNotesCollapsed(true);
+      if (localStorage.getItem(ACTIVITY_COLLAPSED_KEY) === "1") setActivityCollapsed(true);
+    } catch {}
+  }, []);
+  useEffect(() => { try { localStorage.setItem(NOTES_COLLAPSED_KEY, notesCollapsed ? "1" : "0"); } catch {} }, [notesCollapsed]);
+  useEffect(() => { try { localStorage.setItem(ACTIVITY_COLLAPSED_KEY, activityCollapsed ? "1" : "0"); } catch {} }, [activityCollapsed]);
+
+  // Global keyboard shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      const inInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target as HTMLElement)?.isContentEditable;
+      const mod = e.metaKey || e.ctrlKey;
+
+      if (mod && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setMetaOpen((v) => !v);
-      } else if (e.key === "Escape" && metaOpen) {
-        setMetaOpen(false);
+        return;
+      }
+      if (e.key === "Escape") {
+        if (showShortcuts) { setShowShortcuts(false); return; }
+        if (metaOpen) { setMetaOpen(false); return; }
+        return;
+      }
+      if (e.key === "?" && !mod && !inInput) {
+        setShowShortcuts((v) => !v);
+        return;
+      }
+      if (mod && e.key.toLowerCase() === "w") {
+        e.preventDefault();
+        if (activeFileTabId) {
+          setFileTabs((prev) => prev.filter((t) => t.id !== activeFileTabId));
+          setActiveFileTabId(null);
+        }
+        return;
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [metaOpen]);
+  }, [metaOpen, showShortcuts, activeFileTabId]);
 
-  // Persist selection across reloads.
+  // Persist selection
   useEffect(() => {
     const saved = localStorage.getItem(SELECTED_KEY);
     if (saved) setSelectedId(saved);
@@ -94,13 +135,11 @@ export default function Home() {
     if (selectedId) localStorage.setItem(SELECTED_KEY, selectedId);
   }, [selectedId]);
 
-  // Re-render every second so countdowns/uptime tick.
   useEffect(() => {
     const i = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(i);
   }, []);
 
-  // Drop expired live file changes.
   useEffect(() => {
     const i = setInterval(() => {
       setFileChanges((prev) => prev.filter((c) => Date.now() - c.ts < FILE_TTL_MS));
@@ -108,12 +147,10 @@ export default function Home() {
     return () => clearInterval(i);
   }, []);
 
-  // Initial fetch (handles the case where WS is slow).
   useEffect(() => {
-    void api
-      .list()
-      .then((j) => setAgents(j.agents))
-      .catch(() => {});
+    void api.list().then((j) => setAgents(j.agents)).catch(() => {});
+    void api.projects.list().then((j) => setProjects(j.projects)).catch(() => {});
+    void api.chats.list().then((j) => setChats(j.chats)).catch(() => {});
   }, []);
 
   const { connected } = useWs(WS_URL, (m: WsMessage) => {
@@ -133,12 +170,9 @@ export default function Home() {
       });
     } else if (m.type === "agent_removed") {
       setAgents((prev) => prev.filter((a) => a.agent.id !== m.agentId));
-      setEventsByAgent((prev) => {
-        const next = { ...prev };
-        delete next[m.agentId];
-        return next;
-      });
+      setEventsByAgent((prev) => { const next = { ...prev }; delete next[m.agentId]; return next; });
       setSelectedId((cur) => (cur === m.agentId ? null : cur));
+      setMainView((cur) => (cur?.kind === "agent" && cur.agentId === m.agentId ? null : cur));
     } else if (m.type === "transcript") {
       setEventsByAgent((prev) => {
         const cur = prev[m.agentId] ?? [];
@@ -155,54 +189,36 @@ export default function Home() {
         next[m.agentId] = [];
         return next;
       });
+    } else if (m.type === "projects_snapshot") {
+      setProjects(m.projects);
+    } else if (m.type === "project_removed") {
+      setProjects((prev) => prev.filter((p) => p.id !== m.projectId));
+    } else if (m.type === "chats_snapshot") {
+      setChats(m.chats);
+    } else if (m.type === "chat_removed") {
+      setChats((prev) => prev.filter((c) => c.id !== m.chatId));
+      setMainView((cur) => (cur?.kind === "chat" && cur.chatId === m.chatId ? null : cur));
     }
   });
 
-  // Auto-select first agent if none.
+  // Auto-select first agent
   useEffect(() => {
     if (!selectedId && agents.length > 0) setSelectedId(agents[0].agent.id);
   }, [agents, selectedId]);
 
+  // Seed initial main view from selected agent
   useEffect(() => {
-    setTabs((prev) => {
-      const filtered = prev.filter(
-        (t) => t.kind !== "agent" || agents.some((a) => a.agent.id === t.agentId),
-      );
-      return filtered.length === prev.length ? prev : filtered;
-    });
-  }, [agents]);
+    if (mainView) return;
+    if (!selectedId) return;
+    setMainView({ kind: "agent", agentId: selectedId });
+  }, [selectedId, mainView]);
 
-  // Seed an initial agent tab once agents have loaded.
-  useEffect(() => {
-    if (tabs.length > 0) return;
-    if (agents.length === 0) return;
-    const initialId =
-      selectedId && agents.some((a) => a.agent.id === selectedId)
-        ? selectedId
-        : agents[0].agent.id;
-    const t: TabState = { id: uid(), kind: "agent", agentId: initialId };
-    setTabs([t]);
-    setActiveTabId(t.id);
-  }, [agents, tabs.length, selectedId]);
-
-  useEffect(() => {
-    if (activeTabId && !tabs.some((t) => t.id === activeTabId)) {
-      setActiveTabId(tabs[0]?.id ?? null);
-    }
-  }, [tabs, activeTabId]);
-
-  // Lazy-load transcript history for newly selected agent if we have none.
+  // Lazy-load transcript for selected agent
   useEffect(() => {
     if (!selectedId) return;
     if ((eventsByAgent[selectedId]?.length ?? 0) > 0) return;
-    void api
-      .events(selectedId)
-      .then((r) =>
-        setEventsByAgent((prev) => ({
-          ...prev,
-          [selectedId]: r.events,
-        })),
-      )
+    void api.events(selectedId)
+      .then((r) => setEventsByAgent((prev) => ({ ...prev, [selectedId]: r.events })))
       .catch(() => {});
   }, [selectedId]);
 
@@ -211,287 +227,171 @@ export default function Home() {
     [agents, selectedId],
   );
 
-  const activeTab = useMemo(
-    () => tabs.find((t) => t.id === activeTabId) ?? null,
-    [tabs, activeTabId],
+  const activeAgentId = mainView?.kind === "agent" ? mainView.agentId : selectedId;
+  const activeAgentEntry = useMemo(
+    () => agents.find((a) => a.agent.id === activeAgentId) ?? null,
+    [agents, activeAgentId],
   );
-
-  const activeAgentEntry = useMemo(() => {
-    if (activeTab?.kind !== "agent") return null;
-    return agents.find((a) => a.agent.id === activeTab.agentId) ?? null;
-  }, [activeTab, agents]);
-
-  const tabsForBar: Tab[] = useMemo(
-    () =>
-      tabs.map((t): Tab => {
-        if (t.kind === "agent") {
-          const a = agents.find((x) => x.agent.id === t.agentId)?.agent;
-          return {
-            id: t.id,
-            kind: "agent",
-            agentId: t.agentId,
-            label: a?.name ?? "(removed)",
-          };
-        }
-        if (t.kind === "chat") {
-          const a = agents.find((x) => x.agent.id === t.agentId)?.agent;
-          return {
-            id: t.id,
-            kind: "chat",
-            agentId: t.agentId,
-            label: a?.name ?? "(removed)",
-          };
-        }
-        const name =
-          t.filePath?.split("/").pop() ??
-          (t.hash === "WORKING" ? "working tree" : t.hash.slice(0, 7));
-        return {
-          id: t.id,
-          kind: "file",
-          workingDir: t.workingDir,
-          hash: t.hash,
-          filePath: t.filePath,
-          label: name,
-        };
-      }),
-    [tabs, agents],
-  );
-
-  const activeAgentEvents =
-    activeTab?.kind === "agent"
-      ? (eventsByAgent[activeTab.agentId] ?? [])
-      : [];
-
-  const liveChangesForSidebar = selected
-    ? fileChanges.filter((c) =>
-        c.path.startsWith(selected.agent.workingDir + "/"),
-      )
-    : [];
+  const activeAgentEvents = activeAgentId ? (eventsByAgent[activeAgentId] ?? []) : [];
 
   const onSidebarSelect = (agentId: string) => {
     setSelectedId(agentId);
-    const existing = tabs.find(
-      (t) => t.kind === "agent" && t.agentId === agentId,
+    setMainView({ kind: "agent", agentId });
+    setActiveFileTabId(null);
+  };
+
+  const onNewChat = useCallback(async (workingDir: string, projectName: string) => {
+    try {
+      const { chat } = await api.chats.create({ name: projectName, workingDir });
+      setChats((prev) => [...prev.filter((c) => c.id !== chat.id), chat]);
+      setMainView({ kind: "chat", chatId: chat.id, workingDir, displayName: chat.name });
+      setActiveFileTabId(null);
+    } catch (err) {
+      console.error("Failed to create chat:", err);
+    }
+  }, []);
+
+  const onOpenChat = useCallback((chatId: string, name: string, workingDir: string) => {
+    setMainView({ kind: "chat", chatId, workingDir, displayName: name });
+    setActiveFileTabId(null);
+  }, []);
+
+  const onDeleteChat = useCallback((chatId: string) => {
+    void api.chats.remove(chatId).catch(() => {});
+    setChats((prev) => prev.filter((c) => c.id !== chatId));
+    setMainView((cur) => (cur?.kind === "chat" && cur.chatId === chatId ? null : cur));
+  }, []);
+
+  const onAddAgentToProject = (workingDir: string) => {
+    setNewAgentWorkingDir(workingDir);
+    setShowNewAgent(true);
+  };
+
+  const onDeleteProject = (projectId: string) => {
+    void api.projects.remove(projectId).catch(() => {});
+    setProjects((prev) => prev.filter((p) => p.id !== projectId));
+  };
+
+  const onOpenFile = (f: { workingDir: string; hash: string; filePath: string | null }) => {
+    const existing = fileTabs.find(
+      (t) => t.workingDir === f.workingDir && t.hash === f.hash && t.filePath === f.filePath,
     );
-    if (existing) {
-      setActiveTabId(existing.id);
-      return;
-    }
-    const active = tabs.find((t) => t.id === activeTabId);
-    if (active && active.kind === "agent") {
-      setTabs((prev) =>
-        prev.map((t) => (t.id === active.id ? { ...t, agentId } : t)),
-      );
-      return;
-    }
-    const lastAgentTab = [...tabs].reverse().find((t) => t.kind === "agent");
-    if (lastAgentTab) {
-      setTabs((prev) =>
-        prev.map((t) => (t.id === lastAgentTab.id ? { ...t, agentId } : t)),
-      );
-      setActiveTabId(lastAgentTab.id);
-      return;
-    }
-    const t: TabState = { id: uid(), kind: "agent", agentId };
-    setTabs((prev) => [...prev, t]);
-    setActiveTabId(t.id);
+    if (existing) { setActiveFileTabId(existing.id); return; }
+    const t: FileTab = { id: uid(), ...f };
+    setFileTabs((prev) => [...prev, t]);
+    setActiveFileTabId(t.id);
   };
 
-  const onSidebarOpenInNewTab = (agentId: string) => {
-    setSelectedId(agentId);
-    const t: TabState = { id: uid(), kind: "agent", agentId };
-    setTabs((prev) => [...prev, t]);
-    setActiveTabId(t.id);
+  const onCloseFileTab = (id: string) => {
+    setFileTabs((prev) => prev.filter((t) => t.id !== id));
+    if (activeFileTabId === id) setActiveFileTabId(null);
   };
 
-  const onOpenChat = (agentId: string) => {
-    const existing = tabs.find((t) => t.kind === "chat" && t.agentId === agentId);
-    if (existing) {
-      setActiveTabId(existing.id);
-      return;
-    }
-    const t: TabState = { id: uid(), kind: "chat", agentId };
-    setTabs((prev) => [...prev, t]);
-    setActiveTabId(t.id);
-  };
+  // Sidebar indicators
+  const activeChatIds = useMemo(() => {
+    if (mainView?.kind === "chat") return new Set([mainView.chatId]);
+    return new Set<string>();
+  }, [mainView]);
 
-  const onOpenFile = (f: {
-    workingDir: string;
-    hash: string;
-    filePath: string | null;
-  }) => {
-    const existing = tabs.find(
-      (t) =>
-        t.kind === "file" &&
-        t.workingDir === f.workingDir &&
-        t.hash === f.hash &&
-        t.filePath === f.filePath,
-    );
-    if (existing) {
-      setActiveTabId(existing.id);
-      return;
-    }
-    const t: TabState = { id: uid(), kind: "file", ...f };
-    setTabs((prev) => [...prev, t]);
-    setActiveTabId(t.id);
-  };
+  const streamingChatIds = useMemo(() => {
+    if (mainView?.kind === "chat" && streamingChat) return new Set([mainView.chatId]);
+    return new Set<string>();
+  }, [mainView, streamingChat]);
 
-  const onActivateTab = (id: string) => {
-    setActiveTabId(id);
-    const t = tabs.find((x) => x.id === id);
-    if (t?.kind === "agent") setSelectedId(t.agentId);
-  };
+  const liveChangesForSidebar = selected
+    ? fileChanges.filter((c) => c.path.startsWith(selected.agent.workingDir + "/"))
+    : [];
 
-  const onCloseTab = (id: string) => {
-    const idx = tabs.findIndex((t) => t.id === id);
-    if (idx === -1) return;
-    const next = tabs.filter((t) => t.id !== id);
-    setTabs(next);
-    if (activeTabId === id) {
-      const newActive = next[idx] ?? next[idx - 1] ?? null;
-      setActiveTabId(newActive?.id ?? null);
-      if (newActive?.kind === "agent") setSelectedId(newActive.agentId);
-    }
-  };
+  const fileTabsForBar: Tab[] = fileTabs.map((t) => {
+    const name = t.filePath?.split("/").pop() ?? (t.hash === "WORKING" ? "working tree" : t.hash.slice(0, 7));
+    return { id: t.id, kind: "file", workingDir: t.workingDir, hash: t.hash, filePath: t.filePath, label: name };
+  });
 
-  // Close the active tab on Cmd/Ctrl+W. The browser reserves Cmd+W to close
-  // its own tab, so preventDefault may or may not work depending on how the
-  // page is hosted (webview wrappers often let it through). We also bind
-  // Cmd/Ctrl+Shift+W as a guaranteed-available alternative.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const mod = e.metaKey || e.ctrlKey;
-      if (!mod) return;
-      if (e.key.toLowerCase() !== "w") return;
-      if (!activeTabId) return;
-      e.preventDefault();
-      onCloseTab(activeTabId);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [activeTabId, tabs]);
-
-  const agentSettingsEntry = useMemo(() => {
-    if (!agentSettingsId) return null;
-    return agents.find((a) => a.agent.id === agentSettingsId) ?? null;
-  }, [agentSettingsId, agents]);
-
-  // Panel widths as percentages. Sidebar + main + [meta] + right must sum to 100.
+  // Panel widths
   const [sidebarPct, setSidebarPct] = useState(16);
   const [mainPct, setMainPct] = useState(50);
   const [metaPct, setMetaPct] = useState(25);
-  const [rightPct, setRightPct] = useState(34);
-  // Right panel vertical split: notes height as percentage of right panel height.
   const [notesPct, setNotesPct] = useState(60);
   const containerRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef<HTMLDivElement>(null);
 
-  // When meta opens/closes, redistribute space between main and meta.
   const prevMetaOpenRef = useRef(metaOpen);
   useEffect(() => {
     if (metaOpen === prevMetaOpenRef.current) return;
     prevMetaOpenRef.current = metaOpen;
     if (metaOpen) {
-      // Take metaPct from main
-      const take = Math.min(metaPct, mainPct - 15);
-      setMainPct((p) => p - take);
+      setMainPct((p) => p - Math.min(metaPct, p - 15));
     } else {
-      // Give meta's space back to main
       setMainPct((p) => p + metaPct);
     }
   }, [metaOpen]);
 
   const makeDragH = useCallback(
-    (onDelta: (dpct: number) => void) =>
-      (e: React.MouseEvent) => {
-        e.preventDefault();
-        let last = e.clientX;
-        const onMove = (ev: MouseEvent) => {
-          const total = containerRef.current?.offsetWidth ?? window.innerWidth;
-          const dpct = ((ev.clientX - last) / total) * 100;
-          last = ev.clientX;
-          onDelta(dpct);
-        };
-        const onUp = () => {
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-          document.body.style.cursor = '';
-          document.body.style.userSelect = '';
-        };
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-        document.body.style.cursor = 'col-resize';
-        document.body.style.userSelect = 'none';
-      },
+    (onDelta: (dpct: number) => void) => (e: React.MouseEvent) => {
+      e.preventDefault();
+      let last = e.clientX;
+      const onMove = (ev: MouseEvent) => {
+        const total = containerRef.current?.offsetWidth ?? window.innerWidth;
+        const dpct = ((ev.clientX - last) / total) * 100;
+        last = ev.clientX;
+        onDelta(dpct);
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    },
     [],
   );
 
   const makeDragV = useCallback(
-    (onDelta: (dpct: number) => void) =>
-      (e: React.MouseEvent) => {
-        e.preventDefault();
-        let last = e.clientY;
-        const onMove = (ev: MouseEvent) => {
-          const total = rightPanelRef.current?.offsetHeight ?? window.innerHeight;
-          const dpct = ((ev.clientY - last) / total) * 100;
-          last = ev.clientY;
-          onDelta(dpct);
-        };
-        const onUp = () => {
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-          document.body.style.cursor = '';
-          document.body.style.userSelect = '';
-        };
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-        document.body.style.cursor = 'row-resize';
-        document.body.style.userSelect = 'none';
-      },
+    (onDelta: (dpct: number) => void) => (e: React.MouseEvent) => {
+      e.preventDefault();
+      let last = e.clientY;
+      const onMove = (ev: MouseEvent) => {
+        const total = rightPanelRef.current?.offsetHeight ?? window.innerHeight;
+        const dpct = ((ev.clientY - last) / total) * 100;
+        last = ev.clientY;
+        onDelta(dpct);
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+      document.body.style.cursor = "row-resize";
+      document.body.style.userSelect = "none";
+    },
     [],
   );
 
   const onDragSidebarMain = useMemo(
-    () =>
-      makeDragH((d) => {
-        setSidebarPct((p) => Math.max(8, Math.min(30, p + d)));
-        setMainPct((p) => Math.max(15, p - d));
-      }),
+    () => makeDragH((d) => { setSidebarPct((p) => Math.max(8, Math.min(30, p + d))); setMainPct((p) => Math.max(15, p - d)); }),
     [makeDragH],
   );
-
   const onDragMainMeta = useMemo(
-    () =>
-      makeDragH((d) => {
-        setMainPct((p) => Math.max(15, p + d));
-        setMetaPct((p) => Math.max(15, p - d));
-      }),
+    () => makeDragH((d) => { setMainPct((p) => Math.max(15, p + d)); setMetaPct((p) => Math.max(15, p - d)); }),
     [makeDragH],
   );
-
   const onDragMetaRight = useMemo(
-    () =>
-      makeDragH((d) => {
-        setMetaPct((p) => Math.max(15, p + d));
-        setRightPct((p) => Math.max(15, p - d));
-      }),
+    () => makeDragH((d) => { setMetaPct((p) => Math.max(15, p + d)); }),
     [makeDragH],
   );
-
   const onDragMainRight = useMemo(
-    () =>
-      makeDragH((d) => {
-        setMainPct((p) => Math.max(15, p + d));
-        setRightPct((p) => Math.max(15, p - d));
-      }),
+    () => makeDragH((d) => { setMainPct((p) => Math.max(15, p + d)); }),
     [makeDragH],
   );
-
   const onDragNotesActivity = useMemo(
-    () =>
-      makeDragV((d) => {
-        setNotesPct((p) => Math.max(15, Math.min(85, p + d)));
-      }),
+    () => makeDragV((d) => { setNotesPct((p) => Math.max(15, Math.min(85, p + d))); }),
     [makeDragV],
   );
 
@@ -499,72 +399,83 @@ export default function Home() {
     <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
       <div ref={containerRef} className="flex flex-1 overflow-hidden">
         {/* Sidebar */}
-        <div style={{ width: sidebarPct + '%' }} className="shrink-0 overflow-hidden">
+        <div style={{ width: sidebarPct + "%" }} className="shrink-0 overflow-hidden">
           <AgentSidebar
+            projects={projects}
             agents={agents}
+            chats={chats}
             selectedId={selectedId}
             connected={connected}
             metaOpen={metaOpen}
+            activeChatIds={activeChatIds}
+            streamingChatIds={streamingChatIds}
             onSelect={onSidebarSelect}
-            onOpenInNewTab={onSidebarOpenInNewTab}
-            onNew={() => setShowNew(true)}
+            onNewChat={onNewChat}
+            onOpenChat={onOpenChat}
+            onDeleteChat={onDeleteChat}
+            onNewProject={() => setShowNewProject(true)}
+            onAddAgentToProject={onAddAgentToProject}
+            onDeleteProject={onDeleteProject}
             onToggleMeta={() => setMetaOpen((v) => !v)}
-            onOpenSettings={() => setShowGlobalSettings(true)}
-            onOpenAgentSettings={(id) => setAgentSettingsId(id)}
           />
         </div>
 
-        {/* Drag: sidebar | main */}
-        <div
-          onMouseDown={onDragSidebarMain}
-          className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors"
-        />
+        <div onMouseDown={onDragSidebarMain} className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors" />
 
-        {/* Main transcript / file viewer */}
-        <div style={{ width: mainPct + '%' }} className="flex shrink-0 flex-col overflow-hidden">
-          <TabBar
-            tabs={tabsForBar}
-            activeId={activeTabId}
-            onActivate={onActivateTab}
-            onClose={onCloseTab}
-          />
-          <div className="min-h-0 flex-1">
-            {activeTab?.kind === 'agent' ? (
+        {/* Main panel */}
+        <div style={{ width: mainPct + "%" }} className="flex shrink-0 flex-col overflow-hidden">
+          {/* File tab bar — only shown when file tabs exist */}
+          {fileTabs.length > 0 && (
+            <TabBar
+              tabs={fileTabsForBar}
+              activeId={activeFileTabId}
+              onActivate={(id) => setActiveFileTabId(id)}
+              onClose={onCloseFileTab}
+            />
+          )}
+
+          <div className="relative min-h-0 flex-1">
+            {/* File viewers — keep mounted, display:none when not active */}
+            {fileTabs.map((t) => (
+              <div
+                key={t.id}
+                className="absolute inset-0"
+                style={{ display: activeFileTabId === t.id ? "block" : "none" }}
+              >
+                <FileViewer workingDir={t.workingDir} hash={t.hash} filePath={t.filePath} />
+              </div>
+            ))}
+
+            {/* Chat view — mounted only when active and no file tab covering */}
+            {mainView?.kind === "chat" && !activeFileTabId && (
+              <AgentChat
+                chatKey={mainView.chatId}
+                displayName={mainView.displayName}
+                workingDir={mainView.workingDir}
+                onStreamingChange={setStreamingChat}
+              />
+            )}
+
+            {/* Agent transcript — shown when no file tab and no chat */}
+            {mainView?.kind === "agent" && !activeFileTabId && (
               <Transcript
                 events={activeAgentEvents}
                 agent={activeAgentEntry?.agent ?? null}
                 runtime={activeAgentEntry?.runtime ?? null}
-                onOpenSettings={() =>
-                  activeTab.kind === 'agent' &&
-                  setAgentSettingsId(activeTab.agentId)
-                }
-                onOpenChat={() =>
-                  activeTab.kind === 'agent' &&
-                  onOpenChat(activeTab.agentId)
-                }
+                onOpenSettings={() => {}}
+                onOpenChat={() => {
+                  if (!activeAgentEntry) return;
+                  const project = projects.find((p) => p.workingDir === activeAgentEntry.agent.workingDir);
+                  const name = project?.name ?? activeAgentEntry.agent.name;
+                  void onNewChat(activeAgentEntry.agent.workingDir, name);
+                }}
               />
-            ) : activeTab?.kind === 'chat' ? (
-              (() => {
-                const chatAgent = agents.find((a) => activeTab.kind === 'chat' && a.agent.id === activeTab.agentId)?.agent ?? null;
-                return chatAgent ? (
-                  <AgentChat
-                    agentId={chatAgent.id}
-                    agentName={chatAgent.name}
-                    workingDir={chatAgent.workingDir}
-                  />
-                ) : (
-                  <div className="flex h-full items-center justify-center text-sm italic text-zinc-600">agent not found</div>
-                );
-              })()
-            ) : activeTab?.kind === 'file' ? (
-              <FileViewer
-                workingDir={activeTab.workingDir}
-                hash={activeTab.hash}
-                filePath={activeTab.filePath}
-              />
-            ) : (
+            )}
+
+            {/* Nothing open */}
+            {!mainView && !activeFileTabId && (
               <div className="flex h-full items-center justify-center text-sm italic text-zinc-600">
-                no tab open — select an agent on the left
+                select an agent or open a chat
               </div>
             )}
           </div>
@@ -573,69 +484,86 @@ export default function Home() {
         {/* Meta agent panel */}
         {metaOpen && (
           <>
-            <div
-              onMouseDown={onDragMainMeta}
-              className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors"
-            />
-            <div style={{ width: metaPct + '%' }} className="shrink-0 overflow-hidden">
+            <div onMouseDown={onDragMainMeta} className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors" />
+            <div style={{ width: metaPct + "%" }} className="shrink-0 overflow-hidden">
               <MetaAgentChat onClose={() => setMetaOpen(false)} />
             </div>
-            <div
-              onMouseDown={onDragMetaRight}
-              className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors"
-            />
+            <div onMouseDown={onDragMetaRight} className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors" />
           </>
         )}
 
-        {/* Drag: main | right (only when meta is closed) */}
         {!metaOpen && (
-          <div
-            onMouseDown={onDragMainRight}
-            className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors"
-          />
+          <div onMouseDown={onDragMainRight} className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors" />
         )}
 
-        {/* Right panel: pinned notes + file activity */}
+        {/* Right panel */}
         <div ref={rightPanelRef} className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <div style={{ height: notesPct + '%' }} className="overflow-hidden">
-            <PinnedNotes />
-          </div>
           <div
-            onMouseDown={onDragNotesActivity}
-            className="h-1 shrink-0 cursor-row-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors"
-          />
-          <div className="min-h-0 flex-1 overflow-hidden">
+            className={notesCollapsed ? "shrink-0" : activityCollapsed ? "min-h-0 flex-1 overflow-hidden" : "overflow-hidden"}
+            style={!notesCollapsed && !activityCollapsed ? { height: notesPct + "%" } : undefined}
+          >
+            <PinnedNotes collapsed={notesCollapsed} onToggle={() => setNotesCollapsed((v) => !v)} />
+          </div>
+          {!notesCollapsed && !activityCollapsed && (
+            <div onMouseDown={onDragNotesActivity} className="h-1 shrink-0 cursor-row-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors" />
+          )}
+          <div className={activityCollapsed ? "shrink-0" : "min-h-0 flex-1 overflow-hidden"}>
             <FileActivity
               liveChanges={liveChangesForSidebar}
               workingDir={selected?.agent.workingDir ?? null}
-              lastCommit={
-                selected?.agent.workingDir
-                  ? (commitByDir[selected.agent.workingDir] ?? null)
-                  : null
-              }
+              lastCommit={selected?.agent.workingDir ? (commitByDir[selected.agent.workingDir] ?? null) : null}
               onOpenFile={onOpenFile}
+              collapsed={activityCollapsed}
+              onToggle={() => setActivityCollapsed((v) => !v)}
             />
           </div>
         </div>
       </div>
-      {showNew && (
+
+      {/* Dialogs */}
+      {showNewAgent && (
         <NewAgentDialog
-          onClose={() => setShowNew(false)}
+          lockedWorkingDir={newAgentWorkingDir}
+          onClose={() => { setShowNewAgent(false); setNewAgentWorkingDir(undefined); }}
           onCreated={(a) => {
-            setShowNew(false);
+            setShowNewAgent(false);
+            setNewAgentWorkingDir(undefined);
             onSidebarSelect(a.id);
           }}
         />
       )}
-      {agentSettingsId && (
-        <AgentSettingsModal
-          agent={agentSettingsEntry?.agent ?? null}
-          runtime={agentSettingsEntry?.runtime ?? null}
-          onClose={() => setAgentSettingsId(null)}
+      {showNewProject && (
+        <NewProjectDialog
+          onClose={() => setShowNewProject(false)}
+          onCreated={(p) => { setShowNewProject(false); setProjects((prev) => [...prev, p]); }}
         />
       )}
-      {showGlobalSettings && (
-        <SettingsPage onClose={() => setShowGlobalSettings(false)} />
+      {showGlobalSettings && <SettingsPage onClose={() => setShowGlobalSettings(false)} />}
+
+      {/* Shortcut modal */}
+      {showShortcuts && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onClick={() => setShowShortcuts(false)}
+        >
+          <div
+            className="w-80 rounded-xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-4 text-sm font-semibold text-zinc-100">Keyboard shortcuts</div>
+            <div className="space-y-3">
+              {SHORTCUTS.map(({ key, desc }) => (
+                <div key={key} className="flex items-center justify-between gap-4">
+                  <span className="text-sm text-zinc-400">{desc}</span>
+                  <kbd className="shrink-0 rounded bg-zinc-800 px-2 py-0.5 font-mono text-xs text-zinc-300 border border-zinc-700">
+                    {key}
+                  </kbd>
+                </div>
+              ))}
+            </div>
+            <div className="mt-5 text-[11px] text-zinc-600">Press ? or Esc to close</div>
+          </div>
+        </div>
       )}
     </div>
   );

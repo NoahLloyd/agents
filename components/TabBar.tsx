@@ -1,6 +1,6 @@
 "use client";
 
-import { FileText, MessageSquare } from "lucide-react";
+import { FileText, MessageSquare, X} from "lucide-react";
 
 export type Tab =
   | { id: string; kind: "agent"; agentId: string; label: string }
@@ -19,11 +19,15 @@ export default function TabBar({
   activeId,
   onActivate,
   onClose,
+  streamingTabIds,
+  completedTabIds,
 }: {
   tabs: Tab[];
   activeId: string | null;
   onActivate: (id: string) => void;
   onClose: (id: string) => void;
+  streamingTabIds?: ReadonlySet<string>;
+  completedTabIds?: ReadonlySet<string>;
 }) {
   return (
     <div className="flex h-9 shrink-0 items-stretch overflow-x-auto border-b border-zinc-800 bg-zinc-950">
@@ -46,6 +50,12 @@ export default function TabBar({
             }`}
           >
             <TabIcon tab={t} />
+            {streamingTabIds?.has(t.id) && (
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400 shrink-0" title="running" />
+            )}
+            {!streamingTabIds?.has(t.id) && completedTabIds?.has(t.id) && (
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-600 shrink-0" title="done" />
+            )}
             <span className="max-w-[180px] truncate" title={t.label}>
               {t.label}
             </span>
@@ -57,7 +67,7 @@ export default function TabBar({
               title="close tab"
               className="ml-1 px-1 text-zinc-600 opacity-0 hover:text-zinc-200 group-hover:opacity-100"
             >
-              ✕
+              <X size={11} strokeWidth={2.5} />
             </button>
           </div>
         );

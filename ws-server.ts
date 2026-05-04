@@ -21,8 +21,28 @@ import {
   type DirsByAgent,
 } from "./lib/git-autocommit";
 import type { Agent, FileChange, WsMessage } from "./lib/types";
+import { loadProjects, saveProjects } from "./lib/projects-registry";
+import { loadChats, saveChats } from "./lib/chats-registry";
 
 const PORT = Number(process.env.WS_PORT ?? 4001);
+
+function getProjects(): import("./lib/types").Project[] {
+  let projects = loadProjects();
+  // Auto-seed from agent workingDirs if no projects exist yet
+  if (projects.length === 0) {
+    const seen = new Set<string>();
+    for (const { agent } of listLive()) {
+      if (seen.has(agent.workingDir)) continue;
+      seen.add(agent.workingDir);
+      const name = agent.workingDir.split("/").filter(Boolean).pop() ?? agent.workingDir;
+      projects.push({ id: randomUUID(), name, workingDir: agent.workingDir, createdAt: agent.createdAt });
+    }
+    if (projects.length > 0) saveProjects(projects);
+  }
+  return projects;
+}
+
+
 
 type ClientData = { id: number };
 let nextClientId = 1;
@@ -211,6 +231,80 @@ const server = Bun.serve<ClientData, never>({
       }
     }
 
+
+    // GET /projects — list (auto-seeding from agent workingDirs if empty)
+    if (url.pathname === "/projects" && req.method === "GET") {
+      return json({ projects: getProjects() });
+    }
+
+    // POST /projects — create
+    if (url.pathname === "/projects" && req.method === "POST") {
+      const body = (await req.json()) as { name: string; workingDir: string };
+      if (!body.name || !body.workingDir) {
+        return json({ error: "name and workingDir required" }, 400);
+      }
+      const projects = loadProjects();
+      const project = {
+        id: randomUUID(),
+        name: body.name.trim(),
+        workingDir: body.workingDir.trim(),
+        createdAt: Date.now(),
+      };
+      projects.push(project);
+      saveProjects(projects);
+      return json({ project }, 201);
+    }
+
+    // DELETE /projects/:id
+    const pm = url.pathname.match(/^\/projects\/([^/]+)$/);
+    if (pm && req.method === "DELETE") {
+      const projectId = pm[1];
+      const projects = loadProjects();
+      const idx = projects.findIndex((p) => p.id === projectId);
+      if (idx === -1) return json({ error: "not found" }, 404);
+      projects.splice(idx, 1);
+      saveProjects(projects);
+      broadcast({ type: "project_removed", projectId });
+      return json({ ok: true });
+    }
+
+    // GET /chats — list all chat sessions
+    if (url.pathname === "/chats" && req.method === "GET") {
+      return json({ chats: loadChats() });
+    }
+
+    // POST /chats — create a new chat session
+    if (url.pathname === "/chats" && req.method === "POST") {
+      const body = (await req.json()) as { name: string; workingDir: string };
+      if (!body.name || !body.workingDir) {
+        return json({ error: "name and workingDir required" }, 400);
+      }
+      const chats = loadChats();
+      const chat: import("./lib/types").ChatSession = {
+        id: randomUUID(),
+        name: body.name.trim(),
+        workingDir: body.workingDir.trim(),
+        createdAt: Date.now(),
+      };
+      chats.push(chat);
+      saveChats(chats);
+      broadcast({ type: "chats_snapshot", chats });
+      return json({ chat }, 201);
+    }
+
+    // DELETE /chats/:id
+    const cm = url.pathname.match(/^\/chats\/([^/]+)$/);
+    if (cm && req.method === "DELETE") {
+      const chatId = cm[1];
+      const chats = loadChats();
+      const idx = chats.findIndex((c) => c.id === chatId);
+      if (idx === -1) return json({ error: "not found" }, 404);
+      chats.splice(idx, 1);
+      saveChats(chats);
+      broadcast({ type: "chat_removed", chatId });
+      return json({ ok: true });
+    }
+
     return new Response("not found", { status: 404 });
   },
   websocket: {
@@ -222,6 +316,10 @@ const server = Bun.serve<ClientData, never>({
         agents: listLive(),
       };
       ws.send(JSON.stringify(snapshot));
+      const projectsSnap: WsMessage = { type: "projects_snapshot", projects: getProjects() };
+      ws.send(JSON.stringify(projectsSnap));
+      const chatsSnap: WsMessage = { type: "chats_snapshot", chats: loadChats() };
+      ws.send(JSON.stringify(chatsSnap));
     },
     message(ws, msg) {
       console.log(`[ws] client ${ws.data.id} sent: ${msg.toString().slice(0, 100)}`);

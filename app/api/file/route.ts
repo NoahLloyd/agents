@@ -6,6 +6,7 @@ import { isPathAllowed } from "@/lib/paths";
 export const dynamic = "force-dynamic";
 
 const TEXT_EXTS = new Set([".md", ".txt", ".markdown", ".mdx"]);
+const BINARY_EXTS = new Set([".html", ".htm", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 
 function safe(p: string): string | null {
   if (!p) return null;
@@ -22,6 +23,11 @@ export async function GET(req: Request) {
   try {
     const s = await stat(abs);
     if (!s.isFile()) return NextResponse.json({ error: "not a file" }, { status: 400 });
+    const ext = path.extname(abs).toLowerCase();
+    // Binary/media files: return only metadata; content is fetched via /api/raw-file
+    if (BINARY_EXTS.has(ext)) {
+      return NextResponse.json({ path: abs, mtimeMs: s.mtimeMs });
+    }
     const content = await readFile(abs, "utf8");
     return NextResponse.json({ content, path: abs, mtimeMs: s.mtimeMs });
   } catch (e: unknown) {

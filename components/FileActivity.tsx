@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AutoCommitInfo, FileChange } from "@/lib/types";
 
@@ -29,6 +30,8 @@ export default function FileActivity({
   workingDir,
   lastCommit,
   onOpenFile,
+  collapsed,
+  onToggle,
 }: {
   liveChanges: FileChange[];
   workingDir: string | null;
@@ -38,6 +41,8 @@ export default function FileActivity({
     hash: string;
     filePath: string | null;
   }) => void;
+  collapsed?: boolean;
+  onToggle?: () => void;
 }) {
   const [data, setData] = useState<FilesResp | null>(null);
 
@@ -82,8 +87,16 @@ export default function FileActivity({
               {workingDir.split("/").pop()}
             </span>
           )}
+          <button
+            onClick={onToggle}
+            className="ml-1 shrink-0 text-[10px] text-zinc-600 hover:text-zinc-300"
+            title={collapsed ? "expand" : "collapse"}
+          >
+            {collapsed ? <ChevronRight size={14} strokeWidth={2} /> : <ChevronDown size={14} strokeWidth={2} />}
+          </button>
         </div>
       </div>
+      {!collapsed && (
       <div className="flex-1 overflow-auto px-3 py-2 text-xs">
         {!workingDir && (
           <div className="text-zinc-600 italic">select an agent</div>
@@ -151,6 +164,7 @@ export default function FileActivity({
           </Section>
         ))}
       </div>
+      )}
     </div>
   );
 }
