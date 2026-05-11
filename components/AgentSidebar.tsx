@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   MessageSquare, ChevronDown, ChevronRight,
-  Play, Square, RotateCcw, X, MoreHorizontal, Zap, ZapOff,
+  Play, Square, RotateCcw, X, MoreHorizontal, Zap, ZapOff, Timer,
 } from "lucide-react";
 import type { Agent, AgentRuntime, ChatSession, Project } from "@/lib/types";
 import { api } from "@/lib/api";
@@ -216,9 +216,29 @@ function AgentRow({
   onSelect: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!runtime.killAtMs) return;
+    const id = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [runtime.killAtMs]);
+
+  const killCountdown = runtime.killAtMs
+    ? Math.max(0, Math.floor((runtime.killAtMs - Date.now()) / 1000))
+    : null;
+
+  function fmtCountdown(secs: number): string {
+    if (secs <= 0) return "stopping…";
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (h > 0) return `${h}h ${m.toString().padStart(2, "0")}m`;
+    if (m > 0) return `${m}m ${s.toString().padStart(2, "0")}s`;
+    return `${s}s`;
+  }
 
   const dot = runtime.alive
-    ? agent.keepAlive ? "bg-emerald-400" : "bg-sky-400"
+    ? agent.keepAlive ? "bg-emerald-400 animate-pulse" : "bg-sky-400"
     : runtime.scheduledRestartAt
       ? "bg-amber-400 animate-pulse"
       : agent.enabled ? "bg-red-500" : "bg-zinc-600";
@@ -236,7 +256,15 @@ function AgentRow({
       className={`flex cursor-pointer items-center gap-2.5 px-4 py-2.5 ${selected ? "bg-zinc-800/70" : "hover:bg-zinc-900/60"}`}
     >
       <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${dot}`} />
-      <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-200">{agent.name}</span>
+      <span className="min-w-0 flex-1 truncate">
+        <span className="text-sm font-medium text-zinc-200">{agent.name}</span>
+        {killCountdown !== null && (
+          <span className="ml-2 inline-flex items-center gap-1 rounded bg-amber-950/60 px-1.5 py-0.5 text-[10px] text-amber-300" title="auto-stop timer">
+            <Timer size={10} strokeWidth={2.5} />
+            {fmtCountdown(killCountdown)}
+          </span>
+        )}
+      </span>
 
       <div className="flex shrink-0 items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
         {/* Start / Stop */}
@@ -265,9 +293,9 @@ function AgentRow({
           disabled={busy}
           onClick={() => act(() => api.update(agent.id, { keepAlive: !agent.keepAlive }))}
           title={agent.keepAlive ? "keep-alive on (click to disable)" : "keep-alive off (click to enable)"}
-          className={agent.keepAlive ? "text-emerald-400 hover:text-emerald-300" : "hover:text-zinc-300"}
+          className={agent.keepAlive ? "rounded bg-emerald-900/50 text-emerald-300 ring-1 ring-emerald-600/40 hover:bg-emerald-900/80 hover:text-emerald-200" : "hover:text-zinc-300"}
         >
-          {agent.keepAlive ? <Zap size={15} strokeWidth={2.5} /> : <ZapOff size={15} strokeWidth={2.5} />}
+          {agent.keepAlive ? <Zap size={15} strokeWidth={2.5} fill="currentColor" className="text-green-400" /> : <ZapOff size={15} strokeWidth={2.5} />}
         </IconButton>
 
         {/* Delete */}

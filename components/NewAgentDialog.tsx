@@ -28,6 +28,8 @@ export default function NewAgentDialog({
   const [fallbackModel, setFallbackModel] = useState("claude-sonnet-4-6");
   const [effort, setEffort] = useState<Agent["effort"]>("max");
   const [keepAlive, setKeepAlive] = useState(true);
+  const [killAfterValue, setKillAfterValue] = useState("");
+  const [killAfterUnit, setKillAfterUnit] = useState<"minutes" | "hours">("hours");
   const [startNow, setStartNow] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -42,6 +44,9 @@ export default function NewAgentDialog({
     if (mode === "file" && !filePath.trim()) return setErr("file path required");
     setBusy(true);
     try {
+      const killAfterMs = killAfterValue.trim()
+        ? Number(killAfterValue) * (killAfterUnit === "hours" ? 3_600_000 : 60_000)
+        : null;
       const body: Partial<Agent> = {
         name: name.trim(),
         workingDir: workingDir.trim(),
@@ -53,6 +58,7 @@ export default function NewAgentDialog({
         fallbackModel,
         effort,
         keepAlive,
+        killAfterMs,
         enabled: startNow,
       };
       const { agent } = await api.create(body);
@@ -179,6 +185,26 @@ export default function NewAgentDialog({
               />
               start immediately after creating
             </label>
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-zinc-500">run for</span>
+              <input
+                type="number"
+                min="1"
+                value={killAfterValue}
+                onChange={(e) => setKillAfterValue(e.target.value)}
+                placeholder="unlimited"
+                className="w-20 rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-zinc-100 outline-none focus:border-zinc-500 [appearance:textfield]"
+              />
+              <select
+                value={killAfterUnit}
+                onChange={(e) => setKillAfterUnit(e.target.value as "minutes" | "hours")}
+                className="rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 text-zinc-100 outline-none"
+              >
+                <option value="minutes">minutes</option>
+                <option value="hours">hours</option>
+              </select>
+              <span className="text-zinc-600">then stop</span>
+            </div>
           </div>
 
           {err && (

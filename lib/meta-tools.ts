@@ -183,6 +183,10 @@ export const TOOLS: Anthropic.Tool[] = [
           type: "boolean",
           description: "Default true. Restart on crash and wait out rate limits.",
         },
+        killAfterMs: {
+          type: "number",
+          description: "Optional. Kill the agent after this many milliseconds of total runtime. Useful for time-bounded tasks.",
+        },
       },
       required: ["name", "workingDir", "direction_kind"],
     },
@@ -288,6 +292,41 @@ export const TOOLS: Anthropic.Tool[] = [
       required: ["workingDir"],
     },
   },
+  {
+    name: "list_projects",
+    description:
+      "List all projects in the dashboard sidebar. Returns id, name, and workingDir for each.",
+    input_schema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "create_project",
+    description:
+      "Add a new project to the dashboard sidebar. workingDir should be an absolute path to a repo under /srv/agents/repos/.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Display name for the project." },
+        workingDir: { type: "string", description: "Absolute path to the project directory." },
+      },
+      required: ["name", "workingDir"],
+    },
+  },
+  {
+    name: "delete_project",
+    description:
+      "Remove a project from the dashboard sidebar by its id. Does not delete any files. Confirm destructive intent with the user before calling.",
+    input_schema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string" },
+      },
+      required: ["project_id"],
+    },
+  },
 ];
 
 const EXECUTORS: Record<string, ToolExecutor> = {
@@ -329,6 +368,7 @@ const EXECUTORS: Record<string, ToolExecutor> = {
       effort: (input.effort as Agent["effort"]) ?? "max",
       enabled: input.enabled === undefined ? true : Boolean(input.enabled),
       keepAlive: input.keepAlive === undefined ? true : Boolean(input.keepAlive),
+      killAfterMs: input.killAfterMs != null ? Number(input.killAfterMs) : null,
     };
     const res = await fetchJson<{ agent: Agent }>(`${WS_HTTP}/agents`, {
       method: "POST",
@@ -392,6 +432,29 @@ const EXECUTORS: Record<string, ToolExecutor> = {
     await fetchJson(`${WS_HTTP}/agents/${String(input.agent_id)}`, {
       method: "DELETE",
     });
+    return "deleted";
+  },
+
+  async list_projects() {
+    const { projects } = await fetchJson<{ projects: { id: string; name: string; workingDir: string; createdAt: number }[] }>(
+      `${WS_HTTP}/projects`,
+    );
+    return JSON.stringify(projects, null, 2);
+  },
+
+  async create_project(input) {
+    const name = String(input.name ?? "").trim();
+    const workingDir = String(input.workingDir ?? "").trim();
+    if (!name || !workingDir) throw new Error("name and workingDir are required");
+    const res = await fetchJson<{ project: { id: string; name: string; workingDir: string } }>(
+      `${WS_HTTP}/projects`,
+      { method: "POST", body: JSON.stringify({ name, workingDir }) },
+    );
+    return JSON.stringify({ ok: true, id: res.project.id, name: res.project.name }, null, 2);
+  },
+
+  async delete_project(input) {
+    await fetchJson(`${WS_HTTP}/projects/${String(input.project_id)}`, { method: "DELETE" });
     return "deleted";
   },
 

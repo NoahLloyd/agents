@@ -49,9 +49,8 @@ type LiveAgent = {
   // If set, prepended to the next spawn's prompt. Cleared after use. Used by
   // the stagnation kill path to nudge the model back into substantive work.
   pendingExtraContext: string | null;
-  // Tool calls since the agent last read its own direction file. Resets on
-  // each direction-file Read; triggers a re-anchor nudge at FILE_ANCHOR_TOOL_CALLS.
-  toolCallsSinceFileRead: number;
+  killTimer: ReturnType<typeof setTimeout> | null;
+  killAtMs: number | null;
 };
 
 // An agent that's alive but has produced no transcript activity for this
@@ -62,10 +61,6 @@ const STUCK_THRESHOLD_MS = 5 * 60 * 1000;
 // back.
 const RESTART_BACKOFF_MS = 5_000;
 const MAX_RATE_LIMIT_WAIT_MS = 5 * 60 * 1000;
-// File-anchor nudge: if a file-driven agent hasn't re-read its direction file
-// in this many tool calls, kill + restart with a reminder to re-anchor.
-const FILE_ANCHOR_TOOL_CALLS = 50;
-const FILE_ANCHOR_CONTEXT = `You have been working for ${FILE_ANCHOR_TOOL_CALLS}+ tool calls without re-reading your direction file. Re-read it now as your first action, then re-anchor your work to its priorities before continuing. If you have drifted from what the file asks, correct course.`;
 // Stagnation window: if the agent has made many tool calls in this window
 // but none of them were progress tools (Edit/Write/MultiEdit), we treat it
 // as stuck-in-loop (e.g. atlas was spinning `echo "ok"` for 5h after running
@@ -156,6 +151,7 @@ function makeRuntime(agent: Agent): AgentRuntime {
     lastExit: null,
     rateLimitedUntil: null,
     scheduledRestartAt: null,
+    killAtMs: null,
     stdoutLogPath: logs.stdout,
     stderrLogPath: logs.stderr,
   };
@@ -185,7 +181,7 @@ export function setBroadcaster(fn: Broadcast): void {
   broadcastFn = fn;
 }
 
-const NEVER_EXIT_CODA = `Begin. This session must never end voluntarily. Do not ask questions, do not declare yourself done, do not exit. If you believe the immediate task is complete, find related work: deepen, refactor, cross-link, stress-test, or explore adjacent questions. Always have a next tool call queued.`;
+const NEVER_EXIT_CODA = `Begin. This session must never end voluntarily. Never declare the work done, never enter an observation or maintenance mode, never say you will "monitor" or "watch" — always be actively doing. If the immediate task feels complete, find the next question to dig into, assumption to validate, or detail to sharpen. Always have a next tool call queued.`;
 
 const SESSION_MARKER_PREFIX = "supervisor-agent-id:";
 
@@ -277,6 +273,20 @@ function spawnAgent(la: LiveAgent): void {
   la.sessionOffset = 0;
   la.recentToolCalls = [];
   writePidFile(agent.id, child.pid);
+  if (agent.killAfterMs) {
+    if (la.killAtMs === null) la.killAtMs = Date.now() + agent.killAfterMs;
+    la.runtime.killAtMs = la.killAtMs;
+    if (la.killTimer) clearTimeout(la.killTimer);
+    const remaining = la.killAtMs - Date.now();
+    if (remaining <= 0) {
+      setImmediate(() => stopAgent(agent.id));
+    } else {
+      la.killTimer = setTimeout(() => {
+        console.log(`[sup] agent ${agent.name} hit its time limit — stopping`);
+        stopAgent(agent.id);
+      }, remaining);
+    }
+  }
   console.log(`[sup] spawned agent ${agent.name} pid=${child.pid}`);
   broadcastAgent(la);
   watchSessionsDirFor(la);
@@ -496,29 +506,6 @@ function pollStagnantAgents(): void {
     if (!la.runtime.alive || la.runtime.pid === null) continue;
     if (!la.agent.enabled || !la.agent.keepAlive) continue;
 
-    // File-anchor nudge: file-driven agents that haven't re-read their
-    // direction file in FILE_ANCHOR_TOOL_CALLS tool calls get restarted
-    // with a prompt to re-anchor. Skip if stagnation already firing.
-    if (
-      la.agent.direction.kind === "file" &&
-      la.toolCallsSinceFileRead >= FILE_ANCHOR_TOOL_CALLS &&
-      !la.pendingExtraContext
-    ) {
-      console.warn(
-        `[sup] agent ${la.agent.name} pid=${la.runtime.pid} file-anchor: ${la.toolCallsSinceFileRead} tool calls since last direction-file read — restarting with re-anchor nudge`,
-      );
-      la.pendingExtraContext = FILE_ANCHOR_CONTEXT;
-      la.toolCallsSinceFileRead = 0;
-      try {
-        process.kill(-la.runtime.pid, "SIGTERM");
-      } catch {
-        try {
-          process.kill(la.runtime.pid, "SIGTERM");
-        } catch {}
-      }
-      continue;
-    }
-
     const stagnantCount = isStagnant(
       la.recentToolCalls,
       now,
@@ -530,7 +517,6 @@ function pollStagnantAgents(): void {
     );
     la.pendingExtraContext = STAGNATION_RESTART_CONTEXT;
     la.recentToolCalls = [];
-    la.toolCallsSinceFileRead = 0;
     try {
       process.kill(-la.runtime.pid, "SIGTERM");
     } catch {
@@ -703,17 +689,6 @@ async function tailFromOffset(la: LiveAgent): Promise<void> {
         if (la.recentToolCalls.length > 200) {
           la.recentToolCalls.splice(0, la.recentToolCalls.length - 200);
         }
-        // Track direction-file reads for the file-anchor nudge.
-        if (
-          la.agent.direction.kind === "file" &&
-          ev.name === "Read" &&
-          typeof (ev as unknown as Record<string, unknown> & { input: Record<string, unknown> }).input["file_path"] === "string" &&
-          (ev as unknown as Record<string, unknown> & { input: Record<string, unknown> }).input["file_path"] === la.agent.direction.filePath
-        ) {
-          la.toolCallsSinceFileRead = 0;
-        } else {
-          la.toolCallsSinceFileRead++;
-        }
       }
       broadcastFn({ type: "transcript", agentId: la.agent.id, event: ev });
     }
@@ -761,6 +736,12 @@ export function stopAgent(agentId: string): boolean {
     la.restartTimer = null;
     la.runtime.scheduledRestartAt = null;
   }
+  if (la.killTimer) {
+    clearTimeout(la.killTimer);
+    la.killTimer = null;
+  }
+  la.killAtMs = null;
+  la.runtime.killAtMs = null;
   if (la.runtime.pid !== null && isAlive(la.runtime.pid)) {
     try {
       // Kill the whole process group (claude spawns subprocs).
@@ -810,7 +791,8 @@ export function createAgent(agent: Agent): LiveAgent {
     usedSessionPaths: new Set(),
     recentToolCalls: [],
     pendingExtraContext: null,
-    toolCallsSinceFileRead: 0,
+    killTimer: null,
+    killAtMs: null,
   };
   live.set(agent.id, la);
   persistAgent(agent);
@@ -834,6 +816,7 @@ export function removeAgent(agentId: string): boolean {
   if (!la) return false;
   la.agent.enabled = false;
   if (la.restartTimer) clearTimeout(la.restartTimer);
+  if (la.killTimer) clearTimeout(la.killTimer);
   if (la.sessionsDirWatcher) la.sessionsDirWatcher.close();
   if (la.runtime.pid !== null && isAlive(la.runtime.pid)) {
     try {
@@ -880,7 +863,8 @@ export function init(): void {
       usedSessionPaths: new Set(),
       recentToolCalls: [],
       pendingExtraContext: null,
-      toolCallsSinceFileRead: 0,
+      killTimer: null,
+      killAtMs: null,
     };
     // Reattach to existing live process if PID file exists.
     const existingPid = readPidFile(a.id);

@@ -273,7 +273,7 @@ export default function AgentChat({
     void sendMessage(trimmed, images);
   }, [input, images, streaming, sendMessage]);
 
-  const cancel = useCallback(() => { abortRef.current?.abort(); }, []);
+  const cancel = useCallback(() => { abortRef.current?.abort(); setQueued(null); }, []);
 
   if (historyOpen) {
     return (

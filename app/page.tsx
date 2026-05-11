@@ -74,6 +74,7 @@ export default function Home() {
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
   const [, setTick] = useState(0);
   const [streamingChat, setStreamingChat] = useState(false);
+  const [openChatView, setOpenChatView] = useState<{ chatId: string; workingDir: string; displayName: string } | null>(null);
   const [notesCollapsed, setNotesCollapsed] = useState(false);
   const [activityCollapsed, setActivityCollapsed] = useState(false);
 
@@ -198,6 +199,7 @@ export default function Home() {
     } else if (m.type === "chat_removed") {
       setChats((prev) => prev.filter((c) => c.id !== m.chatId));
       setMainView((cur) => (cur?.kind === "chat" && cur.chatId === m.chatId ? null : cur));
+      setOpenChatView((cur) => (cur?.chatId === m.chatId ? null : cur));
     }
   });
 
@@ -205,6 +207,13 @@ export default function Home() {
   useEffect(() => {
     if (!selectedId && agents.length > 0) setSelectedId(agents[0].agent.id);
   }, [agents, selectedId]);
+
+  // Keep openChatView in sync when mainView changes to a chat (so AgentChat stays mounted on agent switch)
+  useEffect(() => {
+    if (mainView?.kind === "chat") {
+      setOpenChatView({ chatId: mainView.chatId, workingDir: mainView.workingDir, displayName: mainView.displayName });
+    }
+  }, [mainView]);
 
   // Seed initial main view from selected agent
   useEffect(() => {
@@ -260,6 +269,7 @@ export default function Home() {
     void api.chats.remove(chatId).catch(() => {});
     setChats((prev) => prev.filter((c) => c.id !== chatId));
     setMainView((cur) => (cur?.kind === "chat" && cur.chatId === chatId ? null : cur));
+    setOpenChatView((cur) => (cur?.chatId === chatId ? null : cur));
   }, []);
 
   const onAddAgentToProject = (workingDir: string) => {
@@ -294,9 +304,9 @@ export default function Home() {
   }, [mainView]);
 
   const streamingChatIds = useMemo(() => {
-    if (mainView?.kind === "chat" && streamingChat) return new Set([mainView.chatId]);
+    if (openChatView && streamingChat) return new Set([openChatView.chatId]);
     return new Set<string>();
-  }, [mainView, streamingChat]);
+  }, [openChatView, streamingChat]);
 
   const liveChangesForSidebar = selected
     ? fileChanges.filter((c) => c.path.startsWith(selected.agent.workingDir + "/"))
@@ -446,14 +456,19 @@ export default function Home() {
               </div>
             ))}
 
-            {/* Chat view — mounted only when active and no file tab covering */}
-            {mainView?.kind === "chat" && !activeFileTabId && (
-              <AgentChat
-                chatKey={mainView.chatId}
-                displayName={mainView.displayName}
-                workingDir={mainView.workingDir}
-                onStreamingChange={setStreamingChat}
-              />
+            {/* Chat view — keep mounted while a chat is open, hide with CSS when not active */}
+            {openChatView && (
+              <div
+                className="absolute inset-0 flex flex-col"
+                style={{ display: mainView?.kind === "chat" && mainView.chatId === openChatView.chatId && !activeFileTabId ? "flex" : "none" }}
+              >
+                <AgentChat
+                  chatKey={openChatView.chatId}
+                  displayName={openChatView.displayName}
+                  workingDir={openChatView.workingDir}
+                  onStreamingChange={setStreamingChat}
+                />
+              </div>
             )}
 
             {/* Agent transcript — shown when no file tab and no chat */}
@@ -502,7 +517,7 @@ export default function Home() {
             className={notesCollapsed ? "shrink-0" : activityCollapsed ? "min-h-0 flex-1 overflow-hidden" : "overflow-hidden"}
             style={!notesCollapsed && !activityCollapsed ? { height: notesPct + "%" } : undefined}
           >
-            <PinnedNotes collapsed={notesCollapsed} onToggle={() => setNotesCollapsed((v) => !v)} />
+            <PinnedNotes collapsed={notesCollapsed} onToggle={() => setNotesCollapsed((v) => !v)} projects={projects} agents={agents} />
           </div>
           {!notesCollapsed && !activityCollapsed && (
             <div onMouseDown={onDragNotesActivity} className="h-1 shrink-0 cursor-row-resize bg-zinc-800 hover:bg-emerald-700/60 transition-colors" />

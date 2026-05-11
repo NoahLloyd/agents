@@ -34,8 +34,24 @@ function loadConversations(): SavedConversation[] {
   }
 }
 
-function saveConversations(convs: SavedConversation[]): void {
-  localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(convs));
+function saveConversations(convs: SavedConversation[]): SavedConversation[] {
+  let toSave = convs;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(toSave));
+      return toSave;
+    } catch (err) {
+      const isQuota =
+        err instanceof DOMException &&
+        (err.name === "QuotaExceededError" || err.code === 22);
+      if (!isQuota || toSave.length <= 1) {
+        try { localStorage.removeItem(CONVERSATIONS_KEY); } catch {}
+        return [];
+      }
+      toSave = toSave.slice(0, Math.max(1, Math.floor(toSave.length / 2)));
+    }
+  }
+  return toSave;
 }
 
 type Props = { onClose: () => void };
@@ -45,6 +61,7 @@ export default function MetaAgentChat({ onClose }: Props) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const [queued, setQueued] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [conversations, setConversations] = useState<SavedConversation[]>([]);
@@ -90,8 +107,7 @@ export default function MetaAgentChat({ onClose }: Props) {
       };
       const filtered = prev.filter((c) => c.sessionId !== sessionId);
       const next = [conv, ...filtered].slice(0, MAX_SAVED);
-      saveConversations(next);
-      return next;
+      return saveConversations(next);
     });
   }, [entries, sessionId]);
 
@@ -257,6 +273,16 @@ export default function MetaAgentChat({ onClose }: Props) {
     [sessionId, patchAssistant],
   );
 
+  const cancel = useCallback(() => { abortRef.current?.abort(); setQueued(null); }, []);
+
+  // Auto-send queued message when streaming finishes
+  useEffect(() => {
+    if (streaming || !queued) return;
+    const msg = queued;
+    setQueued(null);
+    void sendMessage(msg);
+  }, [streaming, queued, sendMessage]);
+
   const onSubmit = useCallback(() => {
     const trimmed = input.trim();
     if (!trimmed) return;
@@ -265,9 +291,14 @@ export default function MetaAgentChat({ onClose }: Props) {
       setInput("");
       return;
     }
+    if (streaming) {
+      setQueued(trimmed);
+      setInput("");
+      return;
+    }
     setInput("");
     void sendMessage(trimmed);
-  }, [input, sendMessage, newChat]);
+  }, [input, streaming, sendMessage, newChat]);
 
   if (historyOpen) {
     return (
@@ -311,6 +342,14 @@ export default function MetaAgentChat({ onClose }: Props) {
           >
             new
           </button>
+          {streaming && (
+            <button
+              onClick={cancel}
+              className="rounded px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-950/40 hover:text-red-300"
+            >
+              stop
+            </button>
+          )}
           <button
             onClick={onClose}
             className="rounded px-2 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
@@ -334,6 +373,14 @@ export default function MetaAgentChat({ onClose }: Props) {
                 <LiveDots /> thinking…
               </div>
             )}
+          {queued && (
+            <div className="flex justify-end">
+              <div className="flex items-center gap-1.5 rounded-lg bg-zinc-800/60 px-3 py-1.5 text-[12px] text-zinc-400">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                <span className="italic">queued: {queued.slice(0, 40)}{queued.length > 40 ? "…" : ""}</span>
+              </div>
+            </div>
+          )}
           {error && !streaming && (
             <div className="rounded border border-rose-900 bg-rose-950/40 px-2 py-1 text-xs text-rose-300">
               {error}
@@ -347,7 +394,8 @@ export default function MetaAgentChat({ onClose }: Props) {
         value={input}
         onChange={setInput}
         onSubmit={onSubmit}
-        placeholder={sessionId ? "Continue the conversation…" : "Ask about your agents…"}
+        placeholder={queued ? "Another message queued…" : sessionId ? "Continue the conversation…" : "Ask about your agents…"}
+        queued={!!queued}
         images={[]}
         onAddImage={() => {}}
         onRemoveImage={() => {}}

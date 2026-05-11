@@ -193,6 +193,7 @@ const server = Bun.serve<ClientData, never>({
         effort: body.effort ?? "max",
         enabled: body.enabled ?? true,
         keepAlive: body.keepAlive ?? true,
+        killAfterMs: body.killAfterMs ?? null,
         createdAt: Date.now(),
       };
       const la = createAgent(agent);

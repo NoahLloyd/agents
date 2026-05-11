@@ -12,6 +12,7 @@ export type Agent = {
   effort: "low" | "medium" | "high" | "xhigh" | "max";
   enabled: boolean;
   keepAlive: boolean;
+  killAfterMs?: number | null;
   createdAt: number;
 };
 
@@ -25,6 +26,7 @@ export type AgentRuntime = {
   lastExit: { code: number | null; signal: string | null; ts: number } | null;
   rateLimitedUntil: number | null;
   scheduledRestartAt: number | null;
+  killAtMs: number | null;
   stdoutLogPath: string;
   stderrLogPath: string;
 };
